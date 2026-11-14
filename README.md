@@ -14,13 +14,16 @@ Testnets by default: Ethereum Sepolia, Bitcoin testnet, Solana devnet.
 ## What works
 - Create / import wallet, backup confirmation, biometric/PIN unlock
 - Mnemonic encrypted with an AES-256-GCM key in the Android Keystore; seed kept in memory only while unlocked and wiped when the app is backgrounded
+- Token balances: ERC-20 (known Sepolia tokens + any contract you add via "Add token") and SPL (auto-discovered via getTokenAccountsByOwner, Token + Token-2022 programs)
+- Send SOL (SystemProgram transfer) with pre-flight checks for rent-exempt minimums (recipient account creation, leftover balance)
+- Send tokens: ERC-20 `transfer` (gas estimated up front, fails early if it would revert) and SPL `TransferChecked` (recipient's associated token account is created automatically if missing; the fee shown includes that one-time rent)
 - Receive (address + QR + copy) and live balances on ETH, BTC, SOL
-- Send ETH (Sepolia) with address validation and a confirmation dialog
+- Send ETH (Sepolia) and BTC (testnet) with address validation, fee estimate and a confirmation dialog
+- BTC: UTXO fetch (confirmed only), largest-first coin selection, fee from mempool.space (half-hour target), native SegWit signing (BIP-143), change back to the wallet address, RBF enabled, recipients can be bech32/bech32m/P2PKH/P2SH
 
 ## Not implemented yet
-- Sending BTC (UTXO fetch, coin selection, fee estimate, P2WPKH signing)
 - Sending SOL (build transfer message, sign with ed25519, `sendTransaction`)
-- Transaction history, token balances (ERC-20/SPL), fiat prices, multiple accounts
+- Token-2022 extensions such as transfer fees, transaction history, fiat prices, multiple accounts
 - Mainnet: change RPC URLs, ETH chain id (1), BTC path `m/84'/0'/0'/0/0` with hrp `bc`, SOL RPC to mainnet. Do not do this before a professional security audit.
 
 ## Layout

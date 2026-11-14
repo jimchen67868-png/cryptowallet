@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.wallet.AppContainer
 import com.example.wallet.chain.Chain
 import com.example.wallet.chain.ChainProvider
+import com.example.wallet.chain.TokenBalance
 import com.example.wallet.crypto.SeedGenerator
 import com.example.wallet.data.WalletRepository
 import kotlinx.coroutines.launch
@@ -22,6 +23,14 @@ data class Account(
     val error: Boolean = false
 )
 
+data class PendingSend(
+    val chain: Chain,
+    val token: TokenBalance?,
+    val to: String,
+    val amount: String,
+    val fee: BigDecimal?
+)
+
 sealed interface Screen {
     object Welcome : Screen
     object ShowBackup : Screen
@@ -30,7 +39,7 @@ sealed interface Screen {
     object Locked : Screen
     object Home : Screen
     data class Receive(val chain: Chain) : Screen
-    data class Send(val chain: Chain) : Screen
+    data class Send(val chain: Chain, val token: TokenBalance? = null) : Screen
 }
 
 class WalletViewModel(
@@ -49,6 +58,10 @@ class WalletViewModel(
     var message by mutableStateOf<String?>(null)
         private set
     var sending by mutableStateOf(false)
+        private set
+    var pendingSend by mutableStateOf<PendingSend?>(null)
+        private set
+    var tokens by mutableStateOf<Map<Chain, List<TokenBalance>>>(emptyMap())
         private set
 
     /** The seed lives only in memory while unlocked and is wiped on lock(). */
@@ -140,6 +153,8 @@ class WalletViewModel(
         seed?.fill(0)
         seed = null
         accounts = emptyList()
+        pendingSend = null
+        tokens = emptyMap()
         if (repo.hasWallet()) screen = Screen.Locked
     }
 
@@ -152,11 +167,62 @@ class WalletViewModel(
                     if (it.chain == acc.chain) it.copy(balance = result.getOrNull(), error = result.isFailure) else it
                 }
             }
+            viewModelScope.launch {
+                runCatching { provider.getTokenBalances(acc.address) }.onSuccess { list ->
+                    if (accounts.any { it.chain == acc.chain }) tokens = tokens + (acc.chain to list)
+                }
+            }
         }
     }
 
+    // ---- tokens ----
+    fun addToken(chain: Chain, contract: String) {
+        val provider = providers.first { it.chain == chain }
+        viewModelScope.launch {
+            runCatching { provider.addToken(contract.trim()) }
+                .onSuccess { message = "Token added"; refreshBalances() }
+                .onFailure { message = it.message ?: "Could not add token" }
+        }
+    }
+
+    fun removeToken(chain: Chain, id: String) {
+        providers.first { it.chain == chain }.removeToken(id)
+        tokens = tokens + (chain to tokens[chain].orEmpty().filterNot { it.id == id })
+    }
+
     // ---- send ----
-    fun send(chain: Chain, to: String, amountText: String) {
+    /** Validates, estimates the fee, then shows the confirmation dialog. */
+    fun reviewSend(chain: Chain, token: TokenBalance?, to: String, amountText: String) {
+        val provider = providers.first { it.chain == chain }
+        val acc = accounts.firstOrNull { it.chain == chain } ?: return
+        val amount = amountText.trim().toBigDecimalOrNull()
+        val target = to.trim()
+        if (amount == null || amount.signum() <= 0) { message = "Enter a valid amount"; return }
+        if (!provider.isValidAddress(target)) { message = "Invalid ${chain.symbol} address"; return }
+        if (token != null && amount > token.balance) {
+            message = "Amount exceeds your ${token.symbol} balance"; return
+        }
+        sending = true
+        viewModelScope.launch {
+            runCatching {
+                if (token != null) provider.estimateTokenFee(acc.address, token, target, amount)
+                else provider.estimateFee(acc.address, target, amount)
+            }
+                .onSuccess { pendingSend = PendingSend(chain, token, target, amountText.trim(), it) }
+                .onFailure { message = it.message ?: "Could not estimate fee" }
+            sending = false
+        }
+    }
+
+    fun cancelSend() { pendingSend = null }
+
+    fun confirmSend() {
+        val p = pendingSend ?: return
+        pendingSend = null
+        send(p.chain, p.token, p.to, p.amount)
+    }
+
+    private fun send(chain: Chain, token: TokenBalance?, to: String, amountText: String) {
         val provider = providers.first { it.chain == chain }
         val s = seed?.copyOf() ?: return
         val amount = amountText.trim().toBigDecimalOrNull()
@@ -165,7 +231,10 @@ class WalletViewModel(
         if (!provider.isValidAddress(target)) { message = "Invalid ${chain.symbol} address"; s.fill(0); return }
         sending = true
         viewModelScope.launch {
-            val r = runCatching { provider.send(s, target, amount) }
+            val r = runCatching {
+                if (token != null) provider.sendToken(s, token, target, amount)
+                else provider.send(s, target, amount)
+            }
             s.fill(0)
             sending = false
             r.onSuccess {

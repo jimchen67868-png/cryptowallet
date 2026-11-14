@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import com.example.wallet.chain.Chain
+import com.example.wallet.chain.TokenBalance
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 
@@ -72,7 +73,7 @@ fun WalletRoot(vm: WalletViewModel, activity: FragmentActivity) {
                 Screen.Locked -> LockedScreen(vm, activity)
                 Screen.Home -> HomeScreen(vm)
                 is Screen.Receive -> ReceiveScreen(vm, s.chain)
-                is Screen.Send -> SendScreen(vm, s.chain)
+                is Screen.Send -> SendScreen(vm, s.chain, s.token)
             }
         }
     }
@@ -177,6 +178,7 @@ private fun LockedScreen(vm: WalletViewModel, activity: FragmentActivity) {
 
 @Composable
 private fun HomeScreen(vm: WalletViewModel) {
+    var addTokenFor by remember { mutableStateOf<Chain?>(null) }
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Portfolio", style = MaterialTheme.typography.headlineSmall)
@@ -200,6 +202,26 @@ private fun HomeScreen(vm: WalletViewModel) {
                             style = MaterialTheme.typography.headlineSmall
                         )
                         Text(shorten(acc.address), style = MaterialTheme.typography.bodySmall)
+                        vm.tokens[acc.chain].orEmpty().forEach { t ->
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("${t.symbol}  ${t.balance.stripTrailingZeros().toPlainString()}")
+                                Row {
+                                    if (vm.providers.first { it.chain == acc.chain }.supportsTokenSend) {
+                                        TextButton(onClick = { vm.goTo(Screen.Send(acc.chain, t)) }) { Text("Send") }
+                                    }
+                                    if (t.removable) {
+                                        TextButton(onClick = { vm.removeToken(acc.chain, t.id) }) { Text("Remove") }
+                                    }
+                                }
+                            }
+                        }
+                        if (vm.providers.first { it.chain == acc.chain }.supportsCustomTokens) {
+                            TextButton(onClick = { addTokenFor = acc.chain }) { Text("Add token") }
+                        }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(onClick = { vm.goTo(Screen.Receive(acc.chain)) }) { Text("Receive") }
                             Button(onClick = { vm.goTo(Screen.Send(acc.chain)) }) { Text("Send") }
@@ -209,6 +231,34 @@ private fun HomeScreen(vm: WalletViewModel) {
             }
         }
     }
+
+    addTokenFor?.let { c ->
+        AddTokenDialog(
+            onAdd = { vm.addToken(c, it); addTokenFor = null },
+            onDismiss = { addTokenFor = null }
+        )
+    }
+}
+
+@Composable
+private fun AddTokenDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit) {
+    var contract by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add token") },
+        text = {
+            OutlinedTextField(
+                value = contract,
+                onValueChange = { contract = it },
+                label = { Text("Token contract address (0x…)") },
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onAdd(contract) }, enabled = contract.isNotBlank()) { Text("Add") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 @Composable
@@ -230,16 +280,20 @@ private fun ReceiveScreen(vm: WalletViewModel, chain: Chain) {
 }
 
 @Composable
-private fun SendScreen(vm: WalletViewModel, chain: Chain) {
+private fun SendScreen(vm: WalletViewModel, chain: Chain, token: TokenBalance?) {
     val provider = vm.providers.first { it.chain == chain }
+    val asset = token?.symbol ?: chain.symbol
+    val canSend = if (token != null) provider.supportsTokenSend else provider.supportsSend
     var to by remember { mutableStateOf("") }
     var amount by remember { mutableStateOf("") }
-    var confirm by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Send ${chain.symbol}", style = MaterialTheme.typography.headlineSmall)
-        if (!provider.supportsSend) {
-            Text("Sending ${chain.symbol} isn't implemented in this starter yet. See the README for what's needed.")
+        Text("Send $asset", style = MaterialTheme.typography.headlineSmall)
+        if (token != null) {
+            Text("Available: ${token.balance.stripTrailingZeros().toPlainString()} $asset. The network fee is paid in ${chain.symbol}.")
+        }
+        if (!canSend) {
+            Text("Sending $asset isn't implemented in this starter yet. See the README for what's needed.")
         } else {
             OutlinedTextField(
                 value = to, onValueChange = { to = it },
@@ -248,14 +302,14 @@ private fun SendScreen(vm: WalletViewModel, chain: Chain) {
             )
             OutlinedTextField(
                 value = amount, onValueChange = { amount = it },
-                label = { Text("Amount (${chain.symbol})") },
+                label = { Text("Amount ($asset)") },
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.fillMaxWidth()
             )
             if (vm.sending) CircularProgressIndicator()
             Button(
-                onClick = { confirm = true },
+                onClick = { vm.reviewSend(chain, token, to, amount) },
                 enabled = !vm.sending && to.isNotBlank() && amount.isNotBlank(),
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Review") }
@@ -263,17 +317,17 @@ private fun SendScreen(vm: WalletViewModel, chain: Chain) {
         TextButton(onClick = vm::back) { Text("Back") }
     }
 
-    if (confirm) {
+    vm.pendingSend?.let { p ->
+        val fee = p.fee?.stripTrailingZeros()?.toPlainString() ?: "unknown"
+        val sym = p.token?.symbol ?: p.chain.symbol
         AlertDialog(
-            onDismissRequest = { confirm = false },
+            onDismissRequest = vm::cancelSend,
             title = { Text("Confirm transaction") },
             text = {
-                Text("Send ${amount.trim()} ${chain.symbol} to:\n\n${to.trim()}\n\nA network fee applies. This cannot be undone.")
+                Text("Send ${p.amount} $sym to:\n\n${p.to}\n\nNetwork fee: $fee ${p.chain.symbol}\n\nThis cannot be undone.")
             },
-            confirmButton = {
-                TextButton(onClick = { confirm = false; vm.send(chain, to, amount) }) { Text("Send") }
-            },
-            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } }
+            confirmButton = { TextButton(onClick = vm::confirmSend) { Text("Send") } },
+            dismissButton = { TextButton(onClick = vm::cancelSend) { Text("Cancel") } }
         )
     }
 }
