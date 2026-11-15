@@ -9,6 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import org.web3j.crypto.ECKeyPair
+import org.web3j.crypto.Sign
 import java.math.BigInteger
 
 class BitcoinTxTest {
@@ -29,7 +30,7 @@ class BitcoinTxTest {
             TxOut(223_450_000, "76a9143bde42dbee7e4dbe6a21b2d50ce2f0167faa815988ac".unhex())
         )
         val key = ECKeyPair.create(BigInteger("619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9", 16))
-        val pubKey = key.publicKeyPoint.getEncoded(true)
+        val pubKey = Sign.publicPointFromPrivate(key.privateKey).getEncoded(true)
         assertEquals("025476c2e83188368da1ff3e292e7acafcdb3566bb0ad253f62fc70f07aeee6357", pubKey.hex())
         val pkh = Hd.hash160(pubKey)
         assertEquals("1d0f172a0ecb48aee1be1f2687d2963ae33f71a1", pkh.hex())
