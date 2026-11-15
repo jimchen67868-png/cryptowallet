@@ -76,8 +76,8 @@ msg2 = bytes([1,0,5])+bytes([len(keys)])+b''.join(keys)+bh+bytes([2])+ix1+ix2
 tx2 = bytes([1])+ed_sign(sk,msg2)+msg2
 print("SPL_MSG", msg2.hex()); print("SPL_TX", tx2.hex())
 # without create (ATA exists): header(1,0,3), keys [owner, ata, source, mint, token]
-keys3 = [pk, ata, source, mint, TOKEN]
-msg3 = bytes([1,0,2])+bytes([5])+b''.join(keys3)+bh+bytes([1])+bytes([4, 4, 2,3,1,0, len(td)])+td
+keys3 = [pk, source, ata, mint, TOKEN]  # source is listed before ata in the transfer instruction
+msg3 = bytes([1,0,2])+bytes([5])+b''.join(keys3)+bh+bytes([1])+bytes([4, 4, 1,3,2,0, len(td)])+td
 print("SPL_NOCREATE_MSG", msg3.hex())
 
 # ---------- ERC-20 transfer calldata ----------
