@@ -4,15 +4,51 @@ import org.web3j.crypto.ECKeyPair
 import java.io.ByteArrayOutputStream
 import java.math.BigInteger
 import java.security.MessageDigest
+import kotlin.math.ceil
 
 class Utxo(val txid: String, val vout: Int, val value: Long)
 class TxOut(val value: Long, val script: ByteArray)
 
 /** Builds and signs native SegWit (P2WPKH) transactions per BIP-141 / BIP-143. */
 object BitcoinTx {
-    private const val VERSION = 2L
-    private const val SEQUENCE = 0xfffffffdL // opt-in RBF
+    const val DEFAULT_SEQUENCE = 0xfffffffdL // opt-in RBF
     private const val SIGHASH_ALL = 1L
+
+    /**
+     * BIP-143 signature hash for input [index], which must be a P2WPKH output paying [pubKeyHash].
+     * [Utxo.txid] is in the usual display order (reversed relative to the wire format).
+     */
+    fun sighashP2wpkh(
+        version: Long,
+        inputs: List<Utxo>,
+        sequences: List<Long>,
+        outputs: List<TxOut>,
+        index: Int,
+        pubKeyHash: ByteArray,
+        locktime: Long
+    ): ByteArray {
+        require(sequences.size == inputs.size && index in inputs.indices && pubKeyHash.size == 20)
+        val outpoints = inputs.map { outpoint(it) }
+        val hashPrevouts = dsha(concat(outpoints))
+        val hashSequence = dsha(concat(sequences.map { le32(it) }))
+        val hashOutputs = dsha(concat(outputs.map { serializeOutput(it) }))
+        // scriptCode for P2WPKH: OP_DUP OP_HASH160 <20> OP_EQUALVERIFY OP_CHECKSIG, length-prefixed
+        val scriptCode = byteArrayOf(0x19, 0x76, 0xa9.toByte(), 0x14) + pubKeyHash +
+            byteArrayOf(0x88.toByte(), 0xac.toByte())
+        val preimage = concat(
+            listOf(
+                le32(version), hashPrevouts, hashSequence, outpoint(inputs[index]), scriptCode,
+                le64(inputs[index].value), le32(sequences[index]), hashOutputs, le32(locktime), le32(SIGHASH_ALL)
+            )
+        )
+        return dsha(preimage)
+    }
+
+    /** Deterministic (RFC 6979), low-S ECDSA signature, DER-encoded, with the SIGHASH_ALL byte appended. */
+    fun signHash(key: ECKeyPair, hash: ByteArray): ByteArray {
+        val sig = key.sign(hash)
+        return derEncode(sig.r, sig.s) + byteArrayOf(SIGHASH_ALL.toByte())
+    }
 
     /**
      * All inputs must be P2WPKH outputs belonging to [key].
@@ -23,50 +59,40 @@ object BitcoinTx {
         outputs: List<TxOut>,
         key: ECKeyPair,
         pubKey: ByteArray,
-        pubKeyHash: ByteArray
+        pubKeyHash: ByteArray,
+        version: Long = 2L,
+        locktime: Long = 0L,
+        sequences: List<Long> = inputs.map { DEFAULT_SEQUENCE }
     ): ByteArray {
         require(pubKey.size == 33 && pubKeyHash.size == 20)
         require(inputs.isNotEmpty() && outputs.isNotEmpty())
+        require(sequences.size == inputs.size)
 
-        val outpoints = inputs.map { hexToBytes(it.txid).reversedArray() + le32(it.vout.toLong()) }
-        val outputsSer = outputs.map { le64(it.value) + varInt(it.script.size) + it.script }
-
-        val hashPrevouts = dsha(concat(outpoints))
-        val hashSequence = dsha(concat(inputs.map { le32(SEQUENCE) }))
-        val hashOutputs = dsha(concat(outputsSer))
-        // scriptCode for P2WPKH: OP_DUP OP_HASH160 <20> OP_EQUALVERIFY OP_CHECKSIG, length-prefixed
-        val scriptCode = byteArrayOf(0x19, 0x76, 0xa9.toByte(), 0x14) + pubKeyHash +
-            byteArrayOf(0x88.toByte(), 0xac.toByte())
-
-        val witnesses = inputs.mapIndexed { i, u ->
-            val preimage = concat(
-                listOf(
-                    le32(VERSION), hashPrevouts, hashSequence, outpoints[i], scriptCode,
-                    le64(u.value), le32(SEQUENCE), hashOutputs, le32(0), le32(SIGHASH_ALL)
-                )
-            )
-            val sig = key.sign(dsha(preimage)) // deterministic (RFC6979), low-S
-            val der = derEncode(sig.r, sig.s) + byteArrayOf(SIGHASH_ALL.toByte())
-            concat(listOf(byteArrayOf(2), varInt(der.size), der, varInt(pubKey.size), pubKey))
+        val witnesses = inputs.indices.map { i ->
+            val sig = signHash(key, sighashP2wpkh(version, inputs, sequences, outputs, i, pubKeyHash, locktime))
+            concat(listOf(byteArrayOf(2), varInt(sig.size), sig, varInt(pubKey.size), pubKey))
         }
 
         val w = ByteArrayOutputStream()
-        w.write(le32(VERSION))
+        w.write(le32(version))
         w.write(byteArrayOf(0x00, 0x01)) // segwit marker + flag
         w.write(varInt(inputs.size))
-        for (op in outpoints) {
-            w.write(op)
+        inputs.forEachIndexed { i, u ->
+            w.write(outpoint(u))
             w.write(0) // empty scriptSig
-            w.write(le32(SEQUENCE))
+            w.write(le32(sequences[i]))
         }
         w.write(varInt(outputs.size))
-        outputsSer.forEach { w.write(it) }
+        outputs.forEach { w.write(serializeOutput(it)) }
         witnesses.forEach { w.write(it) }
-        w.write(le32(0)) // locktime
+        w.write(le32(locktime))
         return w.toByteArray()
     }
 
     fun toHex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
+
+    private fun outpoint(u: Utxo): ByteArray = hexToBytes(u.txid).reversedArray() + le32(u.vout.toLong())
+    private fun serializeOutput(o: TxOut): ByteArray = le64(o.value) + varInt(o.script.size) + o.script
 
     private fun hexToBytes(s: String): ByteArray {
         require(s.length % 2 == 0)
@@ -99,5 +125,43 @@ object BitcoinTx {
         }
         val body = int(r) + int(s)
         return byteArrayOf(0x30, body.size.toByte()) + body
+    }
+}
+
+/** Largest-first coin selection with change handling. Pure function: no network. */
+object CoinSelection {
+    const val DUST = 546L
+
+    class Plan(val inputs: List<Utxo>, val fee: Long, val change: Long)
+
+    /** Virtual size: 11 overhead + 68 per P2WPKH input + outputs (8 value + 1 length + script). */
+    fun vsize(inputs: Int, destScriptSize: Int, withChange: Boolean): Int =
+        11 + 68 * inputs + (9 + destScriptSize) + (if (withChange) 31 else 0)
+
+    fun select(utxos: List<Utxo>, sats: Long, destScriptSize: Int, feeRate: Double): Plan {
+        require(sats > 0) { "Amount must be positive" }
+        require(feeRate > 0) { "Fee rate must be positive" }
+        val sorted = utxos.sortedByDescending { it.value }
+        if (sorted.isEmpty()) throw IllegalStateException("No confirmed funds available")
+
+        fun fee(inputs: Int, withChange: Boolean) =
+            ceil(feeRate * vsize(inputs, destScriptSize, withChange)).toLong()
+
+        val selected = mutableListOf<Utxo>()
+        var total = 0L
+        for (u in sorted) {
+            selected.add(u)
+            total += u.value
+            val feeWithChange = fee(selected.size, true)
+            if (total >= sats + feeWithChange) {
+                val change = total - sats - feeWithChange
+                return if (change >= DUST) Plan(selected.toList(), feeWithChange, change)
+                else Plan(selected.toList(), total - sats, 0) // dust change goes to the miner
+            }
+            if (total >= sats + fee(selected.size, false)) {
+                return Plan(selected.toList(), total - sats, 0)
+            }
+        }
+        throw IllegalStateException("Insufficient confirmed funds (amount + network fee)")
     }
 }

@@ -20,11 +20,7 @@ import java.util.Base64
 class SolanaProvider(
     private val rpcUrl: String = "https://api.devnet.solana.com",
     /** Friendly names for common mints; unknown mints show a shortened mint address. */
-    private val knownMints: Map<String, String> = mapOf(
-        "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU" to "USDC", // devnet
-        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" to "USDC", // mainnet
-        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" to "USDT"  // mainnet
-    ),
+    private val knownMints: Map<String, String> = DEFAULT_KNOWN_MINTS,
     private val explorerSuffix: String = "?cluster=devnet"
 ) : ChainProvider {
 
@@ -253,35 +249,9 @@ class SolanaProvider(
 
             val ixs = buildList {
                 if (p.needsCreate) {
-                    // CreateIdempotent associated token account for the recipient
-                    add(
-                        SolIx(
-                            ATA_PROGRAM_ID,
-                            listOf(
-                                SolMeta(pk, signer = true, writable = true),
-                                SolMeta(p.destAta, signer = false, writable = true),
-                                SolMeta(p.destOwner, signer = false, writable = false),
-                                SolMeta(p.mint, signer = false, writable = false),
-                                SolMeta(SYSTEM_PROGRAM_ID, signer = false, writable = false),
-                                SolMeta(p.tokenProgram, signer = false, writable = false)
-                            ),
-                            byteArrayOf(1)
-                        )
-                    )
+                    add(SolanaTx.createAssociatedTokenAccountIdempotent(pk, p.destAta, p.destOwner, p.mint, p.tokenProgram))
                 }
-                // TransferChecked: [12, amount u64 LE, decimals]
-                add(
-                    SolIx(
-                        p.tokenProgram,
-                        listOf(
-                            SolMeta(p.source, signer = false, writable = true),
-                            SolMeta(p.mint, signer = false, writable = false),
-                            SolMeta(p.destAta, signer = false, writable = true),
-                            SolMeta(pk, signer = true, writable = false)
-                        ),
-                        byteArrayOf(12) + le64(raw.toLong()) + byteArrayOf(token.decimals.toByte())
-                    )
-                )
+                add(SolanaTx.tokenTransferChecked(p.source, p.mint, p.destAta, pk, p.tokenProgram, raw.toLong(), token.decimals))
             }
 
             signAndSend(sk, pk, ixs)
@@ -316,7 +286,7 @@ class SolanaProvider(
 
         val tokenProgram = Base58.decode(best.getJSONObject("account").getString("owner"))!!
         val source = Base58.decode(best.getString("pubkey"))!!
-        val destAta = SolanaTx.findProgramAddress(listOf(destOwner, tokenProgram, mint), ATA_PROGRAM_ID)
+        val destAta = SolanaTx.associatedTokenAddress(destOwner, mint, tokenProgram)
         val exists = !rpc(
             "getAccountInfo", """["${Base58.encode(destAta)}",{"encoding":"base64"}]"""
         ).getJSONObject("result").isNull("value")
@@ -357,15 +327,7 @@ class SolanaProvider(
                 val lamports = toLamports(amount)
                 checkNativeTransfer(Base58.encode(pk), to.trim(), lamports)
 
-                // SystemProgram.Transfer: [u32 LE instruction index = 2, u64 LE lamports]
-                val ix = SolIx(
-                    SYSTEM_PROGRAM_ID,
-                    listOf(
-                        SolMeta(pk, signer = true, writable = true),
-                        SolMeta(destination, signer = false, writable = true)
-                    ),
-                    le32(2) + le64(lamports)
-                )
+                val ix = SolanaTx.systemTransfer(pk, destination, lamports)
                 signAndSend(sk, pk, listOf(ix))
             } finally {
                 sk.fill(0)
@@ -420,15 +382,19 @@ class SolanaProvider(
         return rpc("sendTransaction", """["$b64",{"encoding":"base64"}]""").getString("result")
     }
 
-    private companion object {
-        const val TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-        const val TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-        const val SIGNATURE_FEE_LAMPORTS = 5_000L
-        const val RENT_NOISE_LAMPORTS = 3_000_000L // ~ rent for a couple of token accounts
+    companion object {
+        private const val TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        private const val TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+        private const val SIGNATURE_FEE_LAMPORTS = 5_000L
+        private const val RENT_NOISE_LAMPORTS = 3_000_000L // ~ rent for a couple of token accounts
 
-        val TOKEN_PROGRAM_ID = TOKEN_PROGRAM
-        val TOKEN_2022_PROGRAM_ID = TOKEN_2022_PROGRAM
-        val ATA_PROGRAM_ID: ByteArray = Base58.decode("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")!!
-        val SYSTEM_PROGRAM_ID: ByteArray = Base58.decode("11111111111111111111111111111111")!!
+        private val TOKEN_PROGRAM_ID = TOKEN_PROGRAM
+        private val TOKEN_2022_PROGRAM_ID = TOKEN_2022_PROGRAM
+
+        val DEFAULT_KNOWN_MINTS: Map<String, String> = mapOf(
+            "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU" to "USDC", // devnet
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" to "USDC", // mainnet
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" to "USDT"  // mainnet
+        )
     }
 }

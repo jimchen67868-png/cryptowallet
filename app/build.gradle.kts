@@ -29,6 +29,8 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
+    testOptions { unitTests { isReturnDefaultValues = true } }
+
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
 
@@ -56,6 +58,8 @@ dependencies {
 
     implementation("org.web3j:core:4.9.8")      // BIP-39/32, secp256k1, Ethereum RPC + signing
     implementation("com.google.zxing:core:3.5.3") // QR codes
+
+    testImplementation("junit:junit:4.13.2")
 
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
 }

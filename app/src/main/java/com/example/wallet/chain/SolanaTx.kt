@@ -1,5 +1,6 @@
 package com.example.wallet.chain
 
+import com.example.wallet.crypto.Base58
 import org.bouncycastle.math.ec.rfc8032.Ed25519
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
@@ -9,6 +10,54 @@ class SolIx(val programId: ByteArray, val accounts: List<SolMeta>, val data: Byt
 
 /** Minimal legacy-format Solana transaction builder/signer. */
 object SolanaTx {
+    val SYSTEM_PROGRAM: ByteArray = Base58.decode("11111111111111111111111111111111")!!
+    val ATA_PROGRAM: ByteArray = Base58.decode("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")!!
+
+    /** SystemProgram.Transfer: [u32 LE instruction index = 2, u64 LE lamports]. */
+    fun systemTransfer(from: ByteArray, to: ByteArray, lamports: Long): SolIx = SolIx(
+        SYSTEM_PROGRAM,
+        listOf(SolMeta(from, signer = true, writable = true), SolMeta(to, signer = false, writable = true)),
+        le32(2) + le64(lamports)
+    )
+
+    /** Associated Token Account program, CreateIdempotent (instruction 1). */
+    fun createAssociatedTokenAccountIdempotent(
+        payer: ByteArray, ata: ByteArray, owner: ByteArray, mint: ByteArray, tokenProgram: ByteArray
+    ): SolIx = SolIx(
+        ATA_PROGRAM,
+        listOf(
+            SolMeta(payer, signer = true, writable = true),
+            SolMeta(ata, signer = false, writable = true),
+            SolMeta(owner, signer = false, writable = false),
+            SolMeta(mint, signer = false, writable = false),
+            SolMeta(SYSTEM_PROGRAM, signer = false, writable = false),
+            SolMeta(tokenProgram, signer = false, writable = false)
+        ),
+        byteArrayOf(1)
+    )
+
+    /** Token / Token-2022 TransferChecked (instruction 12): [12, amount u64 LE, decimals]. */
+    fun tokenTransferChecked(
+        source: ByteArray, mint: ByteArray, dest: ByteArray, owner: ByteArray,
+        tokenProgram: ByteArray, amount: Long, decimals: Int
+    ): SolIx = SolIx(
+        tokenProgram,
+        listOf(
+            SolMeta(source, signer = false, writable = true),
+            SolMeta(mint, signer = false, writable = false),
+            SolMeta(dest, signer = false, writable = true),
+            SolMeta(owner, signer = true, writable = false)
+        ),
+        byteArrayOf(12) + le64(amount) + byteArrayOf(decimals.toByte())
+    )
+
+    /** The associated token account address for [owner] and [mint]. */
+    fun associatedTokenAddress(owner: ByteArray, mint: ByteArray, tokenProgram: ByteArray): ByteArray =
+        findProgramAddress(listOf(owner, tokenProgram, mint), ATA_PROGRAM)
+
+    private fun le32(v: Long) = ByteArray(4) { ((v shr (8 * it)) and 0xff).toByte() }
+    private fun le64(v: Long) = ByteArray(8) { ((v shr (8 * it)) and 0xff).toByte() }
+
 
     /** Serializes a legacy message. [payer] is the fee payer and first signer. */
     fun buildMessage(payer: ByteArray, ixs: List<SolIx>, blockhash: ByteArray): ByteArray {

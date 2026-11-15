@@ -22,6 +22,16 @@ jobs:
         with:
           gradle-version: 8.7
 
+      - name: Unit tests (key derivation, signing, transaction encoding)
+        run: gradle testDebugUnitTest --stacktrace
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: app/build/reports/tests/testDebugUnitTest
+
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
 

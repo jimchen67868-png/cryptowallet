@@ -23,6 +23,19 @@ Public RPC endpoints are rate-limited; for real use put your own provider keys i
 Ethereum sends use legacy gas pricing (works, slightly less efficient than EIP-1559).
 **Do not use real funds until the code has had an independent security review.**
 
+## Tests
+`gradle testDebugUnitTest` (also runs in GitHub Actions before every build; the HTML report is uploaded as an artifact).
+They are plain JVM unit tests, no device or network needed:
+- BIP-39 seeds (Trezor vectors, 12 and 24 words), mnemonic validation
+- BIP-32 test vector 1, SLIP-0010 ed25519 test vector 1
+- Addresses of the standard mnemonic: BIP-84 `bc1qcr8te...`, Ethereum `0x9858...da94`, Solana `HAgk14...pqk`
+- Base58 (Bitcoin Core vectors), Bech32/Bech32m (BIP-173/350 valid + invalid), every Bitcoin address type and wrong-network rejection
+- Bitcoin: the BIP-143 sighash and the exact RFC 6979 signature, a full signed 2-input transaction, coin selection invariants
+- Solana: RFC 8032 Ed25519 vector, SOL transfer and SPL transfer (+ account creation) transactions, PDA derivation
+- ERC-20 `transfer` calldata, EIP-55 checksum of every hard-coded token address, price-lookup rules
+Expected values come from published specs or from `tools/verify` (an independent Python reference implementation).
+**Passing tests do not make the wallet safe**: they cover encoding and signing, not the Android key storage, network code or UI.
+
 ## EVM networks
 Ethereum, Base, Arbitrum, Polygon and BNB Chain, on mainnet and testnet. All share one address (`m/44'/60'/0'/0/0`)
 but balances are per network: **a token sent on the wrong network is not visible on another one.** Each network has its own card,

@@ -56,8 +56,7 @@ class EthereumProvider(
     private val web3: Web3j by lazy { Web3j.build(HttpService(rpcUrl)) }
 
     // m/44'/60'/0'/0/0
-    private fun credentials(seed: ByteArray): Credentials =
-        Credentials.create(Hd.secp256k1(seed, 44 or Hd.H, 60 or Hd.H, 0 or Hd.H, 0, 0))
+    private fun credentials(seed: ByteArray): Credentials = EvmKeys.credentials(seed)
 
     override fun deriveAddress(seed: ByteArray): String = credentials(seed).address
 
@@ -237,13 +236,7 @@ class EthereumProvider(
         } catch (e: ArithmeticException) {
             throw IllegalArgumentException("${token.symbol} allows at most ${token.decimals} decimal places")
         }
-        return FunctionEncoder.encode(
-            Function(
-                "transfer",
-                listOf<Type<*>>(Address(to), Uint256(raw)),
-                listOf<TypeReference<*>>(TypeReference.create(Bool::class.java))
-            )
-        )
+        return Erc20.transferData(to, raw)
     }
 
     /** Gas estimate + 20% buffer. Fails early (with the node's reason) if the transfer would revert. */

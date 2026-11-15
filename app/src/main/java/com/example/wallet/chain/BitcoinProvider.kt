@@ -30,8 +30,6 @@ class BitcoinProvider(
     override val isTestnet = hrp != "bc"
     override val networkName = if (isTestnet) "Testnet" else "Mainnet"
 
-    private class Plan(val inputs: List<Utxo>, val fee: Long, val change: Long)
-
     // m/84'/coinType'/0'/0/0
     private fun keyPair(seed: ByteArray) =
         Hd.secp256k1(seed, 84 or Hd.H, coinType or Hd.H, 0 or Hd.H, 0, 0)
@@ -167,38 +165,11 @@ class BitcoinProvider(
         return maxOf(1.0, j.getDouble("halfHourFee"))
     }
 
-    /** Largest-first coin selection with change handling. */
-    private fun plan(address: String, destScript: ByteArray, sats: Long): Plan {
-        val utxos = fetchUtxos(address).sortedByDescending { it.value }
-        if (utxos.isEmpty()) throw IllegalStateException("No confirmed funds available")
-        val rate = feeRate()
-
-        // vsize: 11 overhead + 68 per P2WPKH input + outputs (8 value + 1 len + script)
-        fun fee(inputs: Int, withChange: Boolean): Long {
-            val vsize = 11 + 68 * inputs + (9 + destScript.size) + (if (withChange) 31 else 0)
-            return ceil(rate * vsize).toLong()
-        }
-
-        val selected = mutableListOf<Utxo>()
-        var total = 0L
-        for (u in utxos) {
-            selected.add(u)
-            total += u.value
-            val feeWithChange = fee(selected.size, true)
-            if (total >= sats + feeWithChange) {
-                val change = total - sats - feeWithChange
-                return if (change >= DUST) Plan(selected.toList(), feeWithChange, change)
-                else Plan(selected.toList(), total - sats, 0) // dust change goes to the miner
-            }
-            if (total >= sats + fee(selected.size, false)) {
-                return Plan(selected.toList(), total - sats, 0)
-            }
-        }
-        throw IllegalStateException("Insufficient confirmed funds (amount + network fee)")
-    }
+    private fun plan(address: String, destScript: ByteArray, sats: Long): CoinSelection.Plan =
+        CoinSelection.select(fetchUtxos(address), sats, destScript.size, feeRate())
 
     /** Output script for any supported destination address, or null if invalid. */
-    private fun scriptForAddress(address: String): ByteArray? {
+    internal fun scriptForAddress(address: String): ByteArray? {
         if (address.lowercase().startsWith("${hrp}1")) {
             val seg = Bech32.decodeSegwit(hrp, address) ?: return null
             val len = seg.program.size
@@ -223,6 +194,6 @@ class BitcoinProvider(
     }
 
     private companion object {
-        const val DUST = 546L
+        const val DUST = CoinSelection.DUST
     }
 }
