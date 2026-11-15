@@ -10,6 +10,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.wallet.AppContainer
 import com.example.wallet.chain.Chain
 import com.example.wallet.chain.ChainProvider
+import com.example.wallet.chain.SwapAsset
+import com.example.wallet.chain.SwapQuote
 import com.example.wallet.chain.TokenBalance
 import com.example.wallet.chain.TxRecord
 import com.example.wallet.crypto.SeedGenerator
@@ -53,6 +55,7 @@ sealed interface Screen {
     data class Receive(val chain: Chain) : Screen
     data class Send(val chain: Chain, val token: TokenBalance? = null) : Screen
     data class History(val chain: Chain) : Screen
+    data class Swap(val chain: Chain, val from: TokenBalance? = null) : Screen
     object NetworkSettings : Screen
     object MainnetWarning : Screen
 }
@@ -80,6 +83,8 @@ class WalletViewModel(
         private set
     var tokens by mutableStateOf<Map<Chain, List<TokenBalance>>>(emptyMap())
         private set
+    var pendingSwap by mutableStateOf<SwapQuote?>(null)
+        private set
     var history by mutableStateOf<HistoryUi>(HistoryUi.Loading)
         private set
     /** CoinGecko coin id -> USD price. */
@@ -97,7 +102,7 @@ class WalletViewModel(
     private var seed: ByteArray? = null
 
     val canGoBack: Boolean
-        get() = screen is Screen.Receive || screen is Screen.Send || screen is Screen.History ||
+        get() = screen is Screen.Receive || screen is Screen.Send || screen is Screen.History || screen is Screen.Swap ||
             screen == Screen.NetworkSettings || screen == Screen.MainnetWarning ||
             screen == Screen.ConfirmBackup || screen == Screen.ShowBackup || screen == Screen.Import
 
@@ -106,7 +111,7 @@ class WalletViewModel(
 
     fun back() {
         screen = when (screen) {
-            is Screen.Receive, is Screen.Send, is Screen.History -> Screen.Home
+            is Screen.Receive, is Screen.Send, is Screen.History, is Screen.Swap -> Screen.Home
             Screen.ConfirmBackup -> Screen.ShowBackup
             Screen.NetworkSettings -> Screen.Home
             Screen.MainnetWarning -> Screen.NetworkSettings
@@ -186,6 +191,7 @@ class WalletViewModel(
         seed = null
         accounts = emptyList()
         pendingSend = null
+        pendingSwap = null
         tokens = emptyMap()
         history = HistoryUi.Loading
         if (repo.hasWallet()) screen = Screen.Locked
@@ -232,9 +238,9 @@ class WalletViewModel(
     }
 
     /** Mainnet safety limit. Returns an error message, or null if the amount is allowed. */
-    private fun limitError(chain: Chain, token: TokenBalance?, amount: BigDecimal): String? {
+    private fun limitError(chain: Chain, tokenId: String?, amount: BigDecimal): String? {
         if (network != Network.MAINNET) return null
-        val unit = priceOf(chain, token?.id)
+        val unit = priceOf(chain, tokenId)
             ?: return "The USD value of this asset can't be verified right now, so the mainnet safety " +
                 "limit can't be applied. Try again shortly. Unpriced or custom tokens can't be sent on mainnet in this build."
         val usd = amount.toDouble() * unit
@@ -274,6 +280,55 @@ class WalletViewModel(
             }
         }
         return if (any) sum else null
+    }
+
+    // ---- swaps (EVM mainnet, via ParaSwap) ----
+    fun requestSwapQuote(chain: Chain, from: TokenBalance?, to: SwapAsset, amountText: String) {
+        val provider = providers.first { it.chain == chain }
+        val acc = accounts.firstOrNull { it.chain == chain } ?: return
+        if (network != Network.MAINNET || !provider.supportsSwap) {
+            message = "Swaps are only available on mainnet EVM networks."; return
+        }
+        val amount = amountText.trim().toBigDecimalOrNull()
+        if (amount == null || amount.signum() <= 0) { message = "Enter a valid amount"; return }
+        val fromAsset = SwapAsset(from?.id, from?.symbol ?: chain.symbol, from?.decimals ?: 18)
+        val balance = from?.balance ?: acc.balance
+        if (balance != null && amount > balance) { message = "Amount exceeds your ${fromAsset.symbol} balance"; return }
+        limitError(chain, from?.id, amount)?.let { message = it; return }
+        sending = true
+        viewModelScope.launch {
+            runCatching { provider.quoteSwap(acc.address, fromAsset, to, amount) }
+                .onSuccess { pendingSwap = it }
+                .onFailure { message = it.message ?: "Could not get a quote" }
+            sending = false
+        }
+    }
+
+    fun cancelSwap() { pendingSwap = null }
+
+    fun confirmSwap(activity: FragmentActivity) {
+        val q = pendingSwap ?: return
+        pendingSwap = null
+        val provider = providers.first { it.chain == q.chain }
+        val s = seed?.copyOf() ?: return
+        viewModelScope.launch {
+            if (!repo.confirmIdentity(activity, "Confirm mainnet swap")) {
+                message = "Authentication cancelled. Nothing was sent."
+                s.fill(0)
+                return@launch
+            }
+            // Re-apply the USD cap right before signing.
+            limitError(q.chain, q.from.id, q.amountIn)?.let { message = it; s.fill(0); return@launch }
+            sending = true
+            val r = runCatching { provider.executeSwap(s, q) }
+            s.fill(0)
+            sending = false
+            r.onSuccess {
+                message = "Swap submitted. Tx: ${it.swapTxId}"
+                screen = Screen.Home
+                refreshBalances()
+            }.onFailure { message = "Swap failed: ${it.message}" }
+        }
     }
 
     // ---- history ----
@@ -326,7 +381,7 @@ class WalletViewModel(
         if (token != null && amount > token.balance) {
             message = "Amount exceeds your ${token.symbol} balance"; return
         }
-        limitError(chain, token, amount)?.let { message = it; return }
+        limitError(chain, token?.id, amount)?.let { message = it; return }
         sending = true
         viewModelScope.launch {
             runCatching {
@@ -365,7 +420,7 @@ class WalletViewModel(
         val target = to.trim()
         if (amount == null || amount.signum() <= 0) { message = "Enter a valid amount"; s.fill(0); return }
         if (!provider.isValidAddress(target)) { message = "Invalid ${chain.symbol} address"; s.fill(0); return }
-        limitError(chain, token, amount)?.let { message = it; s.fill(0); return }
+        limitError(chain, token?.id, amount)?.let { message = it; s.fill(0); return }
         sending = true
         viewModelScope.launch {
             val r = runCatching {

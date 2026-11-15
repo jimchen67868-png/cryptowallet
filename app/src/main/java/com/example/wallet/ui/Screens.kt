@@ -53,6 +53,7 @@ import androidx.fragment.app.FragmentActivity
 import com.example.wallet.chain.Chain
 import com.example.wallet.data.AppConfig
 import com.example.wallet.data.Network
+import com.example.wallet.chain.SwapAsset
 import com.example.wallet.chain.TokenBalance
 import com.example.wallet.chain.TxDirection
 import com.example.wallet.chain.TxRecord
@@ -83,6 +84,7 @@ fun WalletRoot(vm: WalletViewModel, activity: FragmentActivity) {
                 is Screen.Receive -> ReceiveScreen(vm, s.chain)
                 is Screen.Send -> SendScreen(vm, activity, s.chain, s.token)
                 is Screen.History -> HistoryScreen(vm, s.chain)
+                is Screen.Swap -> SwapScreen(vm, activity, s.chain, s.from)
                 Screen.NetworkSettings -> NetworkScreen(vm)
                 Screen.MainnetWarning -> MainnetWarningScreen(vm)
             }
@@ -239,7 +241,12 @@ private fun HomeScreen(vm: WalletViewModel) {
                                 Modifier.weight(1f),
                                 style = MaterialTheme.typography.titleMedium
                             )
-                            TextButton(onClick = { vm.openHistory(acc.chain) }) { Text("History") }
+                            Row {
+                                if (vm.providers.first { it.chain == acc.chain }.supportsSwap) {
+                                    TextButton(onClick = { vm.goTo(Screen.Swap(acc.chain)) }) { Text("Swap") }
+                                }
+                                TextButton(onClick = { vm.openHistory(acc.chain) }) { Text("History") }
+                            }
                         }
                         Text(
                             when {
@@ -264,6 +271,9 @@ private fun HomeScreen(vm: WalletViewModel) {
                                     ?.let { "  ≈ ${formatUsd(t.balance.toDouble() * it)}" }.orEmpty()
                                 Text("${t.symbol}  ${t.balance.stripTrailingZeros().toPlainString()}$tokenUsd")
                                 Row {
+                                    if (vm.providers.first { it.chain == acc.chain }.supportsSwap) {
+                                        TextButton(onClick = { vm.goTo(Screen.Swap(acc.chain, t)) }) { Text("Swap") }
+                                    }
                                     if (vm.providers.first { it.chain == acc.chain }.supportsTokenSend) {
                                         TextButton(onClick = { vm.goTo(Screen.Send(acc.chain, t)) }) { Text("Send") }
                                     }
@@ -445,6 +455,73 @@ private fun MainnetWarningScreen(vm: WalletViewModel) {
         TextButton(onClick = vm::back) { Text("Cancel") }
     }
 }
+
+@Composable
+private fun SwapScreen(vm: WalletViewModel, activity: FragmentActivity, chain: Chain, from: TokenBalance?) {
+    val provider = vm.providers.first { it.chain == chain }
+    val fromSymbol = from?.symbol ?: chain.symbol
+    val options = provider.swapAssets().filter { it.id?.lowercase() != from?.id?.lowercase() }
+    var toIndex by remember { mutableStateOf(0) }
+    var amount by remember { mutableStateOf("") }
+    val available = from?.balance ?: vm.accounts.firstOrNull { it.chain == chain }?.balance
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Swap on ${chain.label}", style = MaterialTheme.typography.headlineSmall)
+        Text("From: $fromSymbol" + (available?.let { "  (available ${it.plain()})" } ?: ""))
+        Text("To:")
+        options.forEachIndexed { i, o ->
+            if (i == toIndex) {
+                Button(onClick = { toIndex = i }, modifier = Modifier.fillMaxWidth()) { Text(o.symbol) }
+            } else {
+                OutlinedButton(onClick = { toIndex = i }, modifier = Modifier.fillMaxWidth()) { Text(o.symbol) }
+            }
+        }
+        OutlinedTextField(
+            value = amount, onValueChange = { amount = it },
+            label = { Text("Amount ($fromSymbol)") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            modifier = Modifier.fillMaxWidth()
+        )
+        val unitPrice = vm.priceOf(chain, from?.id)
+        val typed = amount.trim().toBigDecimalOrNull()
+        if (unitPrice != null && typed != null && typed.signum() > 0) {
+            Text("≈ ${formatUsd(typed.toDouble() * unitPrice)}", style = MaterialTheme.typography.bodySmall)
+        }
+        if (vm.sending) CircularProgressIndicator()
+        Button(
+            onClick = { options.getOrNull(toIndex)?.let { vm.requestSwapQuote(chain, from, it, amount) } },
+            enabled = !vm.sending && amount.isNotBlank() && options.isNotEmpty(),
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Get quote") }
+        Text(
+            "Routed through ParaSwap. Before anything is signed, the app checks the quote's router, tokens, amount, " +
+                "payout address and minimum output itself, and rejects the swap if anything is off.",
+            style = MaterialTheme.typography.bodySmall
+        )
+        TextButton(onClick = vm::back) { Text("Back") }
+    }
+
+    vm.pendingSwap?.let { q ->
+        AlertDialog(
+            onDismissRequest = vm::cancelSwap,
+            title = { Text("Confirm MAINNET swap") },
+            text = {
+                Text(
+                    "Swap ${q.amountIn.plain()} ${q.from.symbol} for about ${q.expectedOut.plain()} ${q.to.symbol}\n\n" +
+                        "Minimum you receive: ${q.minOut.plain()} ${q.to.symbol} (${q.slippageBps / 100.0}% slippage)\n" +
+                        (if (q.needsApproval) "\nFirst needs a token approval for exactly this amount, so 2 transactions.\n" else "") +
+                        (q.gasUsd?.let { "\nEstimated network fee: about $" + it + "\n" } ?: "") +
+                        "\nThis cannot be undone."
+                )
+            },
+            confirmButton = { TextButton(onClick = { vm.confirmSwap(activity) }) { Text("Swap") } },
+            dismissButton = { TextButton(onClick = vm::cancelSwap) { Text("Cancel") } }
+        )
+    }
+}
+
+private fun java.math.BigDecimal.plain(): String = stripTrailingZeros().toPlainString()
 
 @Composable
 private fun HistoryScreen(vm: WalletViewModel, chain: Chain) {

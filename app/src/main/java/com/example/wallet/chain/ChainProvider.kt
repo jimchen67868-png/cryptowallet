@@ -73,6 +73,21 @@ interface ChainProvider {
     /** Recent transactions for [address] (newest data the public APIs return). */
     suspend fun getHistory(address: String): List<TxRecord> = emptyList()
 
+    /** True if [quoteSwap] / [executeSwap] work on this network (EVM mainnets only). */
+    val supportsSwap: Boolean get() = false
+
+    /** Assets the user can swap between on this network (native coin + curated tokens). */
+    fun swapAssets(): List<SwapAsset> = emptyList()
+
+    suspend fun quoteSwap(userAddress: String, from: SwapAsset, to: SwapAsset, amount: BigDecimal): SwapQuote {
+        throw UnsupportedOperationException("Swaps are not supported on ${chain.label}")
+    }
+
+    /** Approves (if needed), validates the aggregator's transaction, then signs and broadcasts the swap. */
+    suspend fun executeSwap(seed: ByteArray, quote: SwapQuote): SwapResult {
+        throw UnsupportedOperationException("Swaps are not supported on ${chain.label}")
+    }
+
     /** Block explorer page for a transaction id. */
     fun explorerUrl(txId: String): String
 

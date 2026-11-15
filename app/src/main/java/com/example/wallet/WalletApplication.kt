@@ -40,7 +40,8 @@ class AppContainer(context: Context) {
     /** One generic EVM provider per network: add another chain by adding one more call. */
     private fun evm(
         chain: Chain, rpc: String, chainId: Long, tokens: TokenStore, testnet: Boolean,
-        testnetName: String, known: List<TokenInfo>, historyApi: String?, explorerTx: String
+        testnetName: String, known: List<TokenInfo>, historyApi: String?, explorerTx: String,
+        swapId: Int? = null
     ) = EthereumProvider(
         tokenStore = tokens,
         rpcUrl = rpc,
@@ -50,7 +51,8 @@ class AppContainer(context: Context) {
         explorerTxUrl = explorerTx,
         evmChain = chain,
         isTestnet = testnet,
-        testnetName = testnetName
+        testnetName = testnetName,
+        swapNetworkId = swapId
     )
 
     private val testnetProviders: List<ChainProvider> by lazy {
@@ -76,7 +78,8 @@ class AppContainer(context: Context) {
                 knownTokens = EthereumProvider.MAINNET_TOKENS,
                 explorerApi = "https://eth.blockscout.com/api/v2",
                 explorerTxUrl = "https://etherscan.io/tx/",
-                isTestnet = false
+                isTestnet = false,
+                swapNetworkId = 1
             ),
             BitcoinProvider(
                 apiBase = "https://mempool.space/api",
@@ -91,13 +94,13 @@ class AppContainer(context: Context) {
                 explorerSuffix = ""
             ),
             evm(Chain.BASE, "https://base-rpc.publicnode.com", 8453L, mainnetTokens, false,
-                "Mainnet", EvmTokens.BASE, "https://base.blockscout.com/api/v2", "https://basescan.org/tx/"),
+                "Mainnet", EvmTokens.BASE, "https://base.blockscout.com/api/v2", "https://basescan.org/tx/", 8453),
             evm(Chain.ARB, "https://arbitrum-one-rpc.publicnode.com", 42161L, mainnetTokens, false,
-                "Mainnet", EvmTokens.ARBITRUM, "https://arbitrum.blockscout.com/api/v2", "https://arbiscan.io/tx/"),
+                "Mainnet", EvmTokens.ARBITRUM, "https://arbitrum.blockscout.com/api/v2", "https://arbiscan.io/tx/", 42161),
             evm(Chain.POL, "https://polygon-bor-rpc.publicnode.com", 137L, mainnetTokens, false,
-                "Mainnet", EvmTokens.POLYGON, "https://polygon.blockscout.com/api/v2", "https://polygonscan.com/tx/"),
+                "Mainnet", EvmTokens.POLYGON, "https://polygon.blockscout.com/api/v2", "https://polygonscan.com/tx/", 137),
             evm(Chain.BNB, "https://bsc-rpc.publicnode.com", 56L, mainnetTokens, false,
-                "Mainnet", EvmTokens.BNB, null, "https://bscscan.com/tx/")
+                "Mainnet", EvmTokens.BNB, null, "https://bscscan.com/tx/", 56)
         )
     }
 

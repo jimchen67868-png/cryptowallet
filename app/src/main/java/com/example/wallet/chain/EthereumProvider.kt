@@ -44,7 +44,9 @@ class EthereumProvider(
     /** Which EVM network this instance talks to (Ethereum, Base, Arbitrum, Polygon, BNB Chain). */
     private val evmChain: Chain = Chain.ETH,
     override val isTestnet: Boolean = true,
-    testnetName: String = "Sepolia testnet"
+    testnetName: String = "Sepolia testnet",
+    /** ParaSwap network id (1, 8453, 42161, 137, 56). Null disables swaps, e.g. on testnets. */
+    private val swapNetworkId: Int? = null
 ) : ChainProvider {
 
     override val chain = evmChain
@@ -202,6 +204,129 @@ class EthereumProvider(
         )
     }
 
+    // ---- swaps (ParaSwap) ----
+
+    override val supportsSwap: Boolean get() = swapNetworkId != null
+
+    private val paraSwap: ParaSwapApi? by lazy { swapNetworkId?.let { ParaSwapApi(it) } }
+
+    override fun swapAssets(): List<SwapAsset> =
+        if (!supportsSwap) emptyList()
+        else listOf(SwapAsset(null, chain.symbol, 18)) + knownTokens.map { SwapAsset(it.address, it.symbol, it.decimals) }
+
+    override suspend fun quoteSwap(
+        userAddress: String, from: SwapAsset, to: SwapAsset, amount: BigDecimal
+    ): SwapQuote = withContext(Dispatchers.IO) {
+        val api = paraSwap ?: throw UnsupportedOperationException("Swaps are not available on ${chain.label}")
+        require(SwapGuard.tokenKey(from) != SwapGuard.tokenKey(to)) { "Choose two different assets" }
+        val raw = rawAmount(amount, from.decimals)
+        val route = api.route(userAddress, from, to, raw)
+        var needsApproval = false
+        if (from.id != null) {
+            val spender = route.spender ?: SwapGuard.AUGUSTUS_V6
+            check(SwapGuard.isAllowedSpender(spender)) { "Unexpected token spender in the quote" }
+            needsApproval = allowance(from.id, userAddress, spender) < raw
+        }
+        SwapQuote(chain, from, to, raw, route.destAmount, SWAP_SLIPPAGE_BPS, needsApproval, route.gasUsd)
+    }
+
+    override suspend fun executeSwap(seed: ByteArray, quote: SwapQuote): SwapResult = withContext(Dispatchers.IO) {
+        val api = paraSwap ?: throw UnsupportedOperationException("Swaps are not available on ${chain.label}")
+        val creds = credentials(seed)
+        val user = creds.address
+        val txManager = RawTransactionManager(web3, creds, chainId)
+        val approvals = ArrayList<String>()
+
+        // 1. Fresh route; refuse if the price moved against the user since the quote they saw.
+        var route = api.route(user, quote.from, quote.to, quote.amountInRaw)
+        ensurePriceHeld(quote, route)
+
+        // 2. ERC-20 sources: approve exactly this amount (never unlimited) to an allow-listed spender.
+        val srcToken = quote.from.id
+        if (srcToken != null) {
+            val spender = route.spender ?: SwapGuard.AUGUSTUS_V6
+            check(SwapGuard.isAllowedSpender(spender)) { "Unexpected token spender in the quote" }
+            val current = allowance(srcToken, user, spender)
+            if (current < quote.amountInRaw) {
+                // Some tokens (e.g. USDT) refuse a new non-zero approval while an old one is outstanding.
+                if (current.signum() > 0) approvals.add(sendApproval(txManager, user, srcToken, spender, BigInteger.ZERO))
+                approvals.add(sendApproval(txManager, user, srcToken, spender, quote.amountInRaw))
+                route = api.route(user, quote.from, quote.to, quote.amountInRaw) // the wait may have moved the price
+                ensurePriceHeld(quote, route)
+            }
+        }
+
+        // 3. Build the swap transaction, then verify it ourselves before signing.
+        val tx = api.build(user, quote.from, quote.to, route, quote.amountInRaw, quote.slippageBps)
+        SwapGuard.validateSwapTx(
+            tx.to, tx.value, tx.data, quote.from, quote.to, quote.amountInRaw, route.destAmount, user
+        )?.let { throw IllegalStateException(it) }
+        route.contractAddress?.let {
+            check(it.equals(tx.to, ignoreCase = true)) { "Router differs from the one in the quote" }
+        }
+        check(tx.chainId == 0L || tx.chainId == chainId) { "Transaction is for a different network" }
+
+        // 4. Simulate (eth_estimateGas fails if it would revert), then send.
+        val gas = gasForCall(user, tx.to, tx.value, tx.data)
+        val gasPrice = web3.ethGasPrice().send().gasPrice
+        val res = txManager.sendTransaction(gasPrice, gas, tx.to, tx.data, tx.value)
+        if (res.hasError()) throw IllegalStateException(res.error.message)
+        SwapResult(approvals, res.transactionHash)
+    }
+
+    private fun ensurePriceHeld(quote: SwapQuote, route: ParaSwapApi.Route) {
+        val floor = quote.expectedOutRaw.multiply(BigInteger.valueOf(99)).divide(BigInteger.valueOf(100))
+        check(route.destAmount >= floor) { "The price moved by more than 1%. Please request a new quote." }
+    }
+
+    private fun allowance(token: String, owner: String, spender: String): BigInteger {
+        val fn = Function(
+            "allowance",
+            listOf<Type<*>>(Address(owner), Address(spender)),
+            listOf<TypeReference<*>>(TypeReference.create(Uint256::class.java))
+        )
+        return callContract(token, fn).firstOrNull()?.value as? BigInteger
+            ?: throw IllegalStateException("allowance returned nothing")
+    }
+
+    private fun sendApproval(
+        txManager: RawTransactionManager, from: String, token: String, spender: String, amount: BigInteger
+    ): String {
+        val data = Erc20.approveData(spender, amount)
+        val gas = gasForCall(from, token, BigInteger.ZERO, data)
+        val gasPrice = web3.ethGasPrice().send().gasPrice
+        val res = txManager.sendTransaction(gasPrice, gas, token, data, BigInteger.ZERO)
+        if (res.hasError()) throw IllegalStateException(res.error.message)
+        waitForReceipt(res.transactionHash)
+        return res.transactionHash
+    }
+
+    private fun waitForReceipt(hash: String) {
+        repeat(50) { // about 2.5 minutes
+            val receipt = web3.ethGetTransactionReceipt(hash).send().transactionReceipt
+            if (receipt.isPresent) {
+                check(receipt.get().isStatusOK) { "The approval transaction failed" }
+                return
+            }
+            Thread.sleep(3_000)
+        }
+        throw IllegalStateException("The approval is still pending. Check the explorer, then try the swap again.")
+    }
+
+    /** Gas for an arbitrary call, with a 30% buffer (swap gas varies with the route). Fails early on revert. */
+    private fun gasForCall(from: String, to: String, value: BigInteger, data: String): BigInteger {
+        val tx = Transaction.createFunctionCallTransaction(from, null, null, null, to, value, data)
+        val res = web3.ethEstimateGas(tx).send()
+        if (res.hasError()) throw IllegalStateException("Transaction would fail: ${res.error.message}")
+        return res.amountUsed.multiply(BigInteger.valueOf(13)).divide(BigInteger.TEN)
+    }
+
+    private fun rawAmount(amount: BigDecimal, decimals: Int): BigInteger = try {
+        amount.movePointRight(decimals).toBigIntegerExact()
+    } catch (e: ArithmeticException) {
+        throw IllegalArgumentException("At most $decimals decimal places are allowed")
+    }
+
     // ---- sending ERC-20 ----
 
     override suspend fun estimateTokenFee(
@@ -284,6 +409,7 @@ class EthereumProvider(
         }
 
     companion object {
+        private const val SWAP_SLIPPAGE_BPS = 50 // 0.5%
         private const val ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
         private val DECIMALS_FN = Function(

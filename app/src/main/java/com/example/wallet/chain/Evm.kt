@@ -18,6 +18,15 @@ object EvmKeys {
 }
 
 object Erc20 {
+    /** ABI-encoded `approve(address,uint256)` call data, "0x"-prefixed. */
+    fun approveData(spender: String, amount: BigInteger): String = FunctionEncoder.encode(
+        Function(
+            "approve",
+            listOf<Type<*>>(Address(spender), Uint256(amount)),
+            listOf<TypeReference<*>>(TypeReference.create(Bool::class.java))
+        )
+    )
+
     /** ABI-encoded `transfer(address,uint256)` call data, "0x"-prefixed. */
     fun transferData(to: String, raw: BigInteger): String = FunctionEncoder.encode(
         Function(

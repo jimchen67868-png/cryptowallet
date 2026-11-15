@@ -36,6 +36,19 @@ They are plain JVM unit tests, no device or network needed:
 Expected values come from published specs or from `tools/verify` (an independent Python reference implementation).
 **Passing tests do not make the wallet safe**: they cover encoding and signing, not the Android key storage, network code or UI.
 
+## Swaps (EVM mainnets only)
+**Swap** button on the native coin and on token rows. Quotes and transactions come from the ParaSwap API (keyless);
+there is no aggregator liquidity on testnets, so swaps are disabled there.
+Because the wallet signs calldata supplied by a third-party API, `SwapGuard` re-checks it locally and fails closed:
+- the router must be the allow-listed Augustus V6.2 address and equal the one named in the quote
+- the calldata is decoded: source/destination token, exact input amount and payout address (must be you) must match your request
+- minimum output may not be below the quote by more than 1%; the price must not move more than 1% before signing
+- ERC-20 approvals are for the exact amount only, to an allow-listed spender (a leftover non-zero allowance is reset first)
+- the transaction is simulated (`eth_estimateGas`) before sending; the mainnet USD cap and fingerprint/PIN re-check apply
+- swap targets are limited to the native coin and the curated token list
+Not verified against the live API from the development environment: the first real swap should be a few dollars.
+If ParaSwap changes its calldata format, swaps are rejected rather than signed.
+
 ## EVM networks
 Ethereum, Base, Arbitrum, Polygon and BNB Chain, on mainnet and testnet. All share one address (`m/44'/60'/0'/0/0`)
 but balances are per network: **a token sent on the wrong network is not visible on another one.** Each network has its own card,
