@@ -8,11 +8,13 @@ import org.json.JSONObject
 data class TokenInfo(val address: String, val symbol: String, val decimals: Int)
 
 /** Persists user-added token contracts (public data only, never keys). */
-class TokenStore(context: Context) {
+class TokenStore(context: Context, private val namespace: String = "") {
     private val prefs = context.getSharedPreferences("custom_tokens", Context.MODE_PRIVATE)
 
+    private fun key(chain: Chain) = namespace + chain.name
+
     fun list(chain: Chain): List<TokenInfo> {
-        val arr = JSONArray(prefs.getString(chain.name, "[]"))
+        val arr = JSONArray(prefs.getString(key(chain), "[]"))
         return (0 until arr.length()).map {
             val o = arr.getJSONObject(it)
             TokenInfo(o.getString("a"), o.getString("s"), o.getInt("d"))
@@ -30,6 +32,6 @@ class TokenStore(context: Context) {
     private fun save(chain: Chain, tokens: List<TokenInfo>) {
         val arr = JSONArray()
         tokens.forEach { arr.put(JSONObject().put("a", it.address).put("s", it.symbol).put("d", it.decimals)) }
-        prefs.edit().putString(chain.name, arr.toString()).apply()
+        prefs.edit().putString(key(chain), arr.toString()).apply()
     }
 }

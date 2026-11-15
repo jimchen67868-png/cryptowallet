@@ -3,6 +3,7 @@ package com.example.wallet.ui
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -41,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -48,7 +51,12 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import com.example.wallet.chain.Chain
+import com.example.wallet.data.AppConfig
+import com.example.wallet.data.Network
 import com.example.wallet.chain.TokenBalance
+import com.example.wallet.chain.TxDirection
+import com.example.wallet.chain.TxRecord
+import com.example.wallet.chain.TxStatus
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 
@@ -73,7 +81,10 @@ fun WalletRoot(vm: WalletViewModel, activity: FragmentActivity) {
                 Screen.Locked -> LockedScreen(vm, activity)
                 Screen.Home -> HomeScreen(vm)
                 is Screen.Receive -> ReceiveScreen(vm, s.chain)
-                is Screen.Send -> SendScreen(vm, s.chain, s.token)
+                is Screen.Send -> SendScreen(vm, activity, s.chain, s.token)
+                is Screen.History -> HistoryScreen(vm, s.chain)
+                Screen.NetworkSettings -> NetworkScreen(vm)
+                Screen.MainnetWarning -> MainnetWarningScreen(vm)
             }
         }
     }
@@ -88,7 +99,7 @@ private fun WelcomeScreen(vm: WalletViewModel) {
     ) {
         Text("Crypto Wallet", style = MaterialTheme.typography.headlineMedium)
         Text(
-            "Non-custodial: your keys never leave this device.\nTestnets only in this build.",
+            "Non-custodial: your keys never leave this device.\nStarts on test networks. Mainnet is opt-in from the home screen.",
             textAlign = TextAlign.Center
         )
         Spacer(Modifier.height(16.dp))
@@ -187,12 +198,49 @@ private fun HomeScreen(vm: WalletViewModel) {
                 TextButton(onClick = { vm.lock() }) { Text("Lock") }
             }
         }
+        if (vm.network == Network.MAINNET) {
+            Card(
+                Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 12.dp).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("MAINNET · real funds", style = MaterialTheme.typography.titleSmall)
+                    TextButton(onClick = { vm.goTo(Screen.NetworkSettings) }) { Text("Network") }
+                }
+            }
+        } else {
+            TextButton(onClick = { vm.goTo(Screen.NetworkSettings) }) { Text("Network: testnet (change)") }
+        }
+        vm.portfolioUsd()?.let {
+            Text("≈ ${formatUsd(it)}", style = MaterialTheme.typography.headlineMedium)
+        }
+        if (vm.isTestnet) {
+            Text(
+                "Testnet coins have no real value. USD figures are mainnet reference prices from CoinGecko.",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             items(vm.accounts) { acc ->
                 val bal = acc.balance
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text(acc.chain.label, style = MaterialTheme.typography.titleMedium)
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "${acc.chain.label} · ${vm.providers.first { it.chain == acc.chain }.networkName}",
+                                Modifier.weight(1f),
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            TextButton(onClick = { vm.openHistory(acc.chain) }) { Text("History") }
+                        }
                         Text(
                             when {
                                 acc.error -> "Balance unavailable"
@@ -201,6 +249,10 @@ private fun HomeScreen(vm: WalletViewModel) {
                             },
                             style = MaterialTheme.typography.headlineSmall
                         )
+                        val price = vm.priceOf(acc.chain)
+                        if (bal != null && price != null) {
+                            Text("≈ ${formatUsd(bal.toDouble() * price)}", style = MaterialTheme.typography.bodyMedium)
+                        }
                         Text(shorten(acc.address), style = MaterialTheme.typography.bodySmall)
                         vm.tokens[acc.chain].orEmpty().forEach { t ->
                             Row(
@@ -208,7 +260,9 @@ private fun HomeScreen(vm: WalletViewModel) {
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text("${t.symbol}  ${t.balance.stripTrailingZeros().toPlainString()}")
+                                val tokenUsd = vm.priceOf(acc.chain, t.id)
+                                    ?.let { "  ≈ ${formatUsd(t.balance.toDouble() * it)}" }.orEmpty()
+                                Text("${t.symbol}  ${t.balance.stripTrailingZeros().toPlainString()}$tokenUsd")
                                 Row {
                                     if (vm.providers.first { it.chain == acc.chain }.supportsTokenSend) {
                                         TextButton(onClick = { vm.goTo(Screen.Send(acc.chain, t)) }) { Text("Send") }
@@ -270,8 +324,11 @@ private fun ReceiveScreen(vm: WalletViewModel, chain: Chain) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Receive ${chain.symbol}", style = MaterialTheme.typography.headlineSmall)
-        Text("Only send ${chain.label} assets to this address.", textAlign = TextAlign.Center)
+        Text("Receive ${chain.symbol} on ${chain.label}", style = MaterialTheme.typography.headlineSmall)
+        Text(
+            "Only send ${chain.label} (${vm.providers.first { it.chain == chain }.networkName}) assets to this address.",
+            textAlign = TextAlign.Center
+        )
         QrCode(address, 240.dp)
         Text(address, style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center)
         Button(onClick = { clipboard.setText(AnnotatedString(address)) }) { Text("Copy address") }
@@ -280,7 +337,7 @@ private fun ReceiveScreen(vm: WalletViewModel, chain: Chain) {
 }
 
 @Composable
-private fun SendScreen(vm: WalletViewModel, chain: Chain, token: TokenBalance?) {
+private fun SendScreen(vm: WalletViewModel, activity: FragmentActivity, chain: Chain, token: TokenBalance?) {
     val provider = vm.providers.first { it.chain == chain }
     val asset = token?.symbol ?: chain.symbol
     val canSend = if (token != null) provider.supportsTokenSend else provider.supportsSend
@@ -288,7 +345,7 @@ private fun SendScreen(vm: WalletViewModel, chain: Chain, token: TokenBalance?) 
     var amount by remember { mutableStateOf("") }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Send $asset", style = MaterialTheme.typography.headlineSmall)
+        Text("Send $asset on ${chain.label}", style = MaterialTheme.typography.headlineSmall)
         if (token != null) {
             Text("Available: ${token.balance.stripTrailingZeros().toPlainString()} $asset. The network fee is paid in ${chain.symbol}.")
         }
@@ -307,6 +364,11 @@ private fun SendScreen(vm: WalletViewModel, chain: Chain, token: TokenBalance?) 
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.fillMaxWidth()
             )
+            val unitPrice = vm.priceOf(chain, token?.id)
+            val typed = amount.trim().toBigDecimalOrNull()
+            if (unitPrice != null && typed != null && typed.signum() > 0) {
+                Text("≈ ${formatUsd(typed.toDouble() * unitPrice)}", style = MaterialTheme.typography.bodySmall)
+            }
             if (vm.sending) CircularProgressIndicator()
             Button(
                 onClick = { vm.reviewSend(chain, token, to, amount) },
@@ -320,17 +382,143 @@ private fun SendScreen(vm: WalletViewModel, chain: Chain, token: TokenBalance?) 
     vm.pendingSend?.let { p ->
         val fee = p.fee?.stripTrailingZeros()?.toPlainString() ?: "unknown"
         val sym = p.token?.symbol ?: p.chain.symbol
+        val usdText = p.amount.toBigDecimalOrNull()
+            ?.let { a -> vm.priceOf(p.chain, p.token?.id)?.let { " (≈ ${formatUsd(a.toDouble() * it)})" } }
+            .orEmpty()
         AlertDialog(
             onDismissRequest = vm::cancelSend,
-            title = { Text("Confirm transaction") },
+            title = { Text(if (vm.network == Network.MAINNET) "Confirm MAINNET transaction" else "Confirm transaction") },
             text = {
-                Text("Send ${p.amount} $sym to:\n\n${p.to}\n\nNetwork fee: $fee ${p.chain.symbol}\n\nThis cannot be undone.")
+                Text("Send ${p.amount} $sym$usdText on ${p.chain.label} to:\n\n${p.to}\n\nNetwork fee: $fee ${p.chain.symbol}\n\nThis cannot be undone.")
             },
-            confirmButton = { TextButton(onClick = vm::confirmSend) { Text("Send") } },
+            confirmButton = { TextButton(onClick = { vm.confirmSend(activity) }) { Text("Send") } },
             dismissButton = { TextButton(onClick = vm::cancelSend) { Text("Cancel") } }
         )
     }
 }
+
+@Composable
+private fun NetworkScreen(vm: WalletViewModel) {
+    val mainnet = vm.network == Network.MAINNET
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Network", style = MaterialTheme.typography.headlineSmall)
+        Text(
+            if (mainnet) "You are on MAINNET. Balances and sends use real funds."
+            else "You are on test networks (Sepolia, Bitcoin testnet, Solana devnet). Coins here have no real value."
+        )
+        if (mainnet) {
+            Button(onClick = { vm.switchNetwork(Network.TESTNET) }, modifier = Modifier.fillMaxWidth()) {
+                Text("Switch to testnet")
+            }
+        } else {
+            Button(onClick = { vm.goTo(Screen.MainnetWarning) }, modifier = Modifier.fillMaxWidth()) {
+                Text("Switch to mainnet…")
+            }
+        }
+        TextButton(onClick = vm::back) { Text("Back") }
+    }
+}
+
+@Composable
+private fun MainnetWarningScreen(vm: WalletViewModel) {
+    var typed by remember { mutableStateOf("") }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Switch to mainnet?", style = MaterialTheme.typography.headlineSmall)
+        Text("You are about to use real money. Please read this carefully:")
+        Text("• This is a starter project. Its code has not been audited or tested with real funds.")
+        Text("• Transactions cannot be reversed. A wrong address or a bug can lose funds permanently.")
+        Text("• Each send is capped at about $${AppConfig.MAINNET_TX_LIMIT_USD.toInt()} and needs your fingerprint or PIN.")
+        Text("• Start with an amount you can afford to lose, and make sure your recovery phrase backup is correct.")
+        Text("• Anyone with your recovery phrase can take everything. Never share or photograph it.")
+        OutlinedTextField(
+            value = typed,
+            onValueChange = { typed = it },
+            label = { Text("Type MAINNET to continue") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+        Button(
+            onClick = { vm.switchNetwork(Network.MAINNET) },
+            enabled = typed.trim() == "MAINNET",
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("I understand, switch to mainnet") }
+        TextButton(onClick = vm::back) { Text("Cancel") }
+    }
+}
+
+@Composable
+private fun HistoryScreen(vm: WalletViewModel, chain: Chain) {
+    val uriHandler = LocalUriHandler.current
+    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("${chain.label} history", style = MaterialTheme.typography.headlineSmall)
+            TextButton(onClick = { vm.loadHistory(chain) }) { Text("Refresh") }
+        }
+        when (val h = vm.history) {
+            HistoryUi.Loading -> CircularProgressIndicator()
+            is HistoryUi.Failed -> Text("Could not load history: ${h.message}")
+            is HistoryUi.Loaded -> {
+                if (h.items.isEmpty()) {
+                    Text("No transactions yet.")
+                } else {
+                    Text("Tap a transaction to open it in the block explorer.", style = MaterialTheme.typography.bodySmall)
+                    LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(h.items) { tx ->
+                            TxRow(tx) { uriHandler.openUri(vm.explorerUrl(chain, tx.id)) }
+                        }
+                    }
+                }
+            }
+        }
+        TextButton(onClick = vm::back) { Text("Back") }
+    }
+}
+
+@Composable
+private fun TxRow(tx: TxRecord, onClick: () -> Unit) {
+    val label = when (tx.direction) {
+        TxDirection.IN -> "Received"
+        TxDirection.OUT -> "Sent"
+        TxDirection.SELF -> "To yourself"
+    }
+    val suffix = when (tx.status) {
+        TxStatus.PENDING -> " (pending)"
+        TxStatus.FAILED -> " (failed)"
+        TxStatus.CONFIRMED -> ""
+    }
+    val sign = when (tx.direction) {
+        TxDirection.IN -> "+"
+        TxDirection.OUT -> "-"
+        TxDirection.SELF -> ""
+    }
+    Card(Modifier.fillMaxWidth().clickable(onClick = onClick)) {
+        Row(
+            Modifier.padding(12.dp).fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(label + suffix, style = MaterialTheme.typography.titleSmall)
+                tx.counterparty?.let { Text(shorten(it), style = MaterialTheme.typography.bodySmall) }
+                Text(formatTime(tx.timeSec), style = MaterialTheme.typography.bodySmall)
+            }
+            Text("$sign${tx.amount.stripTrailingZeros().toPlainString()} ${tx.symbol}")
+        }
+    }
+}
+
+private fun formatUsd(v: Double): String =
+    if (v > 0 && v < 0.01) "<$0.01"
+    else java.text.NumberFormat.getCurrencyInstance(java.util.Locale.US).format(v)
+
+private fun formatTime(sec: Long?): String =
+    if (sec == null) "Pending"
+    else java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.MEDIUM, java.text.DateFormat.SHORT)
+        .format(java.util.Date(sec * 1000))
 
 @Composable
 private fun QrCode(text: String, size: Dp) {

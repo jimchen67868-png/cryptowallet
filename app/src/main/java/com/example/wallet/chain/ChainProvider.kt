@@ -2,10 +2,15 @@ package com.example.wallet.chain
 
 import java.math.BigDecimal
 
-enum class Chain(val symbol: String, val label: String) {
-    ETH("ETH", "Ethereum (Sepolia testnet)"),
-    BTC("BTC", "Bitcoin (testnet)"),
-    SOL("SOL", "Solana (devnet)")
+/** [symbol] is the native coin. Base and Arbitrum use ETH as gas, so their symbol is "ETH". */
+enum class Chain(val symbol: String, val label: String, val isEvm: Boolean = false) {
+    ETH("ETH", "Ethereum", true),
+    BTC("BTC", "Bitcoin"),
+    SOL("SOL", "Solana"),
+    BASE("ETH", "Base", true),
+    ARB("ETH", "Arbitrum", true),
+    POL("POL", "Polygon", true),
+    BNB("BNB", "BNB Chain", true)
 }
 
 /** A fungible token balance (ERC-20 contract or SPL mint). */
@@ -17,10 +22,30 @@ data class TokenBalance(
     val removable: Boolean = false
 )
 
+enum class TxDirection { IN, OUT, SELF }
+enum class TxStatus { CONFIRMED, PENDING, FAILED }
+
+/** One line of transaction history. [amount] is always positive; [direction] gives the sign. */
+data class TxRecord(
+    val id: String,
+    val timeSec: Long?,          // null while pending / unknown
+    val direction: TxDirection,
+    val amount: BigDecimal,
+    val symbol: String,
+    val counterparty: String?,
+    val status: TxStatus
+)
+
 /** One implementation per blockchain. Add new coins by implementing this. */
 interface ChainProvider {
     val chain: Chain
     val supportsSend: Boolean
+
+    /** True when this provider points at a test network (coins have no real value). */
+    val isTestnet: Boolean
+
+    /** Human-readable network, e.g. "Mainnet" or "Sepolia testnet". */
+    val networkName: String
 
     /** True if [sendToken] is implemented (ERC-20 / SPL transfers). */
     val supportsTokenSend: Boolean get() = false
@@ -44,6 +69,12 @@ interface ChainProvider {
     fun removeToken(id: String) {}
 
     fun isValidAddress(address: String): Boolean
+
+    /** Recent transactions for [address] (newest data the public APIs return). */
+    suspend fun getHistory(address: String): List<TxRecord> = emptyList()
+
+    /** Block explorer page for a transaction id. */
+    fun explorerUrl(txId: String): String
 
     /**
      * Estimated network fee in the chain's main unit, or null if unknown.

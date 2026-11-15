@@ -32,5 +32,9 @@ class WalletRepository(
         return store.loadMnemonic()
     }
 
+    /** Extra biometric/PIN check, e.g. before signing a mainnet transaction. */
+    suspend fun confirmIdentity(activity: FragmentActivity, title: String): Boolean =
+        auth.authenticate(activity, title)
+
     fun wipe() = store.wipe()
 }

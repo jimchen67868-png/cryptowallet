@@ -11,7 +11,13 @@ import com.example.wallet.AppContainer
 import com.example.wallet.chain.Chain
 import com.example.wallet.chain.ChainProvider
 import com.example.wallet.chain.TokenBalance
+import com.example.wallet.chain.TxRecord
 import com.example.wallet.crypto.SeedGenerator
+import com.example.wallet.data.AppConfig
+import com.example.wallet.data.AppSettings
+import com.example.wallet.data.CoinIds
+import com.example.wallet.data.Network
+import com.example.wallet.data.PriceService
 import com.example.wallet.data.WalletRepository
 import kotlinx.coroutines.launch
 import java.math.BigDecimal
@@ -31,6 +37,12 @@ data class PendingSend(
     val fee: BigDecimal?
 )
 
+sealed interface HistoryUi {
+    object Loading : HistoryUi
+    class Loaded(val items: List<TxRecord>) : HistoryUi
+    class Failed(val message: String) : HistoryUi
+}
+
 sealed interface Screen {
     object Welcome : Screen
     object ShowBackup : Screen
@@ -40,11 +52,16 @@ sealed interface Screen {
     object Home : Screen
     data class Receive(val chain: Chain) : Screen
     data class Send(val chain: Chain, val token: TokenBalance? = null) : Screen
+    data class History(val chain: Chain) : Screen
+    object NetworkSettings : Screen
+    object MainnetWarning : Screen
 }
 
 class WalletViewModel(
     private val repo: WalletRepository,
-    val providers: List<ChainProvider>
+    private val providersFor: (Network) -> List<ChainProvider>,
+    private val settings: AppSettings,
+    private val priceService: PriceService
 ) : ViewModel() {
 
     var screen by mutableStateOf<Screen>(if (repo.hasWallet()) Screen.Locked else Screen.Welcome)
@@ -63,12 +80,25 @@ class WalletViewModel(
         private set
     var tokens by mutableStateOf<Map<Chain, List<TokenBalance>>>(emptyMap())
         private set
+    var history by mutableStateOf<HistoryUi>(HistoryUi.Loading)
+        private set
+    /** CoinGecko coin id -> USD price. */
+    var prices by mutableStateOf<Map<String, Double>>(emptyMap())
+        private set
+
+    var network by mutableStateOf(settings.network)
+        private set
+
+    val providers: List<ChainProvider> get() = providersFor(network)
+
+    val isTestnet: Boolean get() = providers.any { it.isTestnet }
 
     /** The seed lives only in memory while unlocked and is wiped on lock(). */
     private var seed: ByteArray? = null
 
     val canGoBack: Boolean
-        get() = screen is Screen.Receive || screen is Screen.Send ||
+        get() = screen is Screen.Receive || screen is Screen.Send || screen is Screen.History ||
+            screen == Screen.NetworkSettings || screen == Screen.MainnetWarning ||
             screen == Screen.ConfirmBackup || screen == Screen.ShowBackup || screen == Screen.Import
 
     fun clearMessage() { message = null }
@@ -76,8 +106,10 @@ class WalletViewModel(
 
     fun back() {
         screen = when (screen) {
-            is Screen.Receive, is Screen.Send -> Screen.Home
+            is Screen.Receive, is Screen.Send, is Screen.History -> Screen.Home
             Screen.ConfirmBackup -> Screen.ShowBackup
+            Screen.NetworkSettings -> Screen.Home
+            Screen.MainnetWarning -> Screen.NetworkSettings
             else -> { pendingWords = emptyList(); Screen.Welcome }
         }
     }
@@ -155,10 +187,12 @@ class WalletViewModel(
         accounts = emptyList()
         pendingSend = null
         tokens = emptyMap()
+        history = HistoryUi.Loading
         if (repo.hasWallet()) screen = Screen.Locked
     }
 
     fun refreshBalances() {
+        refreshPrices()
         accounts.forEach { acc ->
             val provider = providers.first { it.chain == acc.chain }
             viewModelScope.launch {
@@ -174,6 +208,96 @@ class WalletViewModel(
             }
         }
     }
+
+    // ---- network ----
+    /** Re-derives all accounts for [target] from the in-memory seed. Requires the wallet to be unlocked. */
+    fun switchNetwork(target: Network) {
+        val s = seed ?: return
+        if (target == network) { screen = Screen.Home; return }
+        network = target
+        settings.network = target
+        pendingSend = null
+        tokens = emptyMap()
+        history = HistoryUi.Loading
+        runCatching {
+            accounts = providers.map { Account(it.chain, it.deriveAddress(s)) }
+        }.onFailure {
+            message = "Key derivation failed: ${it.message}"
+            lock(force = true)
+            return
+        }
+        screen = Screen.Home
+        message = if (target == Network.MAINNET) "Mainnet enabled. These are real funds." else "Switched to testnet."
+        refreshBalances()
+    }
+
+    /** Mainnet safety limit. Returns an error message, or null if the amount is allowed. */
+    private fun limitError(chain: Chain, token: TokenBalance?, amount: BigDecimal): String? {
+        if (network != Network.MAINNET) return null
+        val unit = priceOf(chain, token?.id)
+            ?: return "The USD value of this asset can't be verified right now, so the mainnet safety " +
+                "limit can't be applied. Try again shortly. Unpriced or custom tokens can't be sent on mainnet in this build."
+        val usd = amount.toDouble() * unit
+        if (usd > AppConfig.MAINNET_TX_LIMIT_USD) {
+            return String.format(
+                java.util.Locale.US,
+                "Over the mainnet safety limit of $%.0f per transaction (this one is about $%.2f).",
+                AppConfig.MAINNET_TX_LIMIT_USD, usd
+            )
+        }
+        return null
+    }
+
+    // ---- prices ----
+    private fun refreshPrices() {
+        viewModelScope.launch {
+            runCatching { priceService.fetchUsd() }.onSuccess { if (it.isNotEmpty()) prices = it }
+        }
+    }
+
+    /** USD price of one unit of the native coin ([tokenId] = null) or of a token; null if unknown. */
+    fun priceOf(chain: Chain, tokenId: String? = null): Double? =
+        CoinIds.forAsset(chain, tokenId)?.let { prices[it] }
+
+    /** Sum of all holdings that have a known price, or null if none do. */
+    fun portfolioUsd(): Double? {
+        var sum = 0.0
+        var any = false
+        for (acc in accounts) {
+            val p = priceOf(acc.chain)
+            val b = acc.balance
+            if (p != null && b != null) { sum += b.toDouble() * p; any = true }
+            for (t in tokens[acc.chain].orEmpty()) {
+                val tp = priceOf(acc.chain, t.id) ?: continue
+                sum += t.balance.toDouble() * tp
+                any = true
+            }
+        }
+        return if (any) sum else null
+    }
+
+    // ---- history ----
+    fun openHistory(chain: Chain) {
+        screen = Screen.History(chain)
+        loadHistory(chain)
+    }
+
+    fun loadHistory(chain: Chain) {
+        val acc = accounts.firstOrNull { it.chain == chain } ?: return
+        val provider = providers.first { it.chain == chain }
+        history = HistoryUi.Loading
+        viewModelScope.launch {
+            val r = runCatching { provider.getHistory(acc.address) }
+            if ((screen as? Screen.History)?.chain != chain) return@launch // user navigated away
+            history = r.fold(
+                onSuccess = { list -> HistoryUi.Loaded(list.sortedByDescending { it.timeSec ?: Long.MAX_VALUE }) },
+                onFailure = { HistoryUi.Failed(it.message ?: "Could not load history") }
+            )
+        }
+    }
+
+    fun explorerUrl(chain: Chain, txId: String): String =
+        providers.first { it.chain == chain }.explorerUrl(txId)
 
     // ---- tokens ----
     fun addToken(chain: Chain, contract: String) {
@@ -202,6 +326,7 @@ class WalletViewModel(
         if (token != null && amount > token.balance) {
             message = "Amount exceeds your ${token.symbol} balance"; return
         }
+        limitError(chain, token, amount)?.let { message = it; return }
         sending = true
         viewModelScope.launch {
             runCatching {
@@ -216,10 +341,21 @@ class WalletViewModel(
 
     fun cancelSend() { pendingSend = null }
 
-    fun confirmSend() {
+    fun confirmSend(activity: FragmentActivity) {
         val p = pendingSend ?: return
         pendingSend = null
-        send(p.chain, p.token, p.to, p.amount)
+        if (network != Network.MAINNET) {
+            send(p.chain, p.token, p.to, p.amount)
+            return
+        }
+        // Mainnet: require fingerprint/PIN again right before signing.
+        viewModelScope.launch {
+            if (!repo.confirmIdentity(activity, "Confirm mainnet transaction")) {
+                message = "Authentication cancelled. Nothing was sent."
+                return@launch
+            }
+            send(p.chain, p.token, p.to, p.amount)
+        }
     }
 
     private fun send(chain: Chain, token: TokenBalance?, to: String, amountText: String) {
@@ -229,6 +365,7 @@ class WalletViewModel(
         val target = to.trim()
         if (amount == null || amount.signum() <= 0) { message = "Enter a valid amount"; s.fill(0); return }
         if (!provider.isValidAddress(target)) { message = "Invalid ${chain.symbol} address"; s.fill(0); return }
+        limitError(chain, token, amount)?.let { message = it; s.fill(0); return }
         sending = true
         viewModelScope.launch {
             val r = runCatching {
@@ -249,5 +386,5 @@ class WalletViewModel(
 class WalletViewModelFactory(private val c: AppContainer) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T =
-        WalletViewModel(c.repository, c.providers) as T
+        WalletViewModel(c.repository, c::providersFor, c.settings, c.priceService) as T
 }

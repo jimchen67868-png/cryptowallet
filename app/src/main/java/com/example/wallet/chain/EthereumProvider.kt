@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import org.web3j.abi.FunctionEncoder
 import org.web3j.abi.FunctionReturnDecoder
 import org.web3j.abi.TypeReference
@@ -28,6 +29,7 @@ import org.web3j.tx.RawTransactionManager
 import org.web3j.utils.Convert
 import java.math.BigDecimal
 import java.math.BigInteger
+import java.time.Instant
 
 /** Ethereum / EVM. Defaults to the Sepolia testnet. */
 class EthereumProvider(
@@ -35,11 +37,19 @@ class EthereumProvider(
     rpcUrl: String = "https://ethereum-sepolia-rpc.publicnode.com",
     private val chainId: Long = 11155111L,
     /** Well-known tokens shown automatically when the balance is above zero. Verify addresses per network. */
-    private val knownTokens: List<TokenInfo> = SEPOLIA_TOKENS
+    private val knownTokens: List<TokenInfo> = SEPOLIA_TOKENS,
+    /** Blockscout REST API (no key needed) used for history. */
+    private val explorerApi: String? = "https://eth-sepolia.blockscout.com/api/v2",
+    private val explorerTxUrl: String = "https://sepolia.etherscan.io/tx/",
+    /** Which EVM network this instance talks to (Ethereum, Base, Arbitrum, Polygon, BNB Chain). */
+    private val evmChain: Chain = Chain.ETH,
+    override val isTestnet: Boolean = true,
+    testnetName: String = "Sepolia testnet"
 ) : ChainProvider {
 
-    override val chain = Chain.ETH
+    override val chain = evmChain
     override val supportsSend = true
+    override val networkName = if (isTestnet) testnetName else "Mainnet"
     override val supportsCustomTokens = true
     override val supportsTokenSend = true
 
@@ -110,6 +120,89 @@ class EthereumProvider(
         return FunctionReturnDecoder.decode(res.value, fn.outputParameters)
     }
 
+    // ---- history ----
+
+    override fun explorerUrl(txId: String) = explorerTxUrl + txId
+
+    /** ETH transfers (value > 0) plus ERC-20 transfers, from Blockscout. */
+    override suspend fun getHistory(address: String): List<TxRecord> = withContext(Dispatchers.IO) {
+        val api = explorerApi ?: throw UnsupportedOperationException(
+            "No free history API is configured for ${chain.label}. Add a Blockscout endpoint in AppContainer."
+        )
+        val me = address.lowercase()
+        val out = ArrayList<TxRecord>()
+
+        for (o in fetchItems("$api/addresses/$address/transactions")) {
+            val wei = runCatching { BigInteger(o.optString("value", "0").ifBlank { "0" }) }.getOrNull() ?: continue
+            if (wei.signum() == 0) continue // contract calls: token moves are listed below
+            out.add(
+                historyRecord(
+                    id = o.optString("hash", ""),
+                    ts = o.optString("timestamp", ""),
+                    me = me,
+                    from = o.optJSONObject("from")?.optString("hash", "").orEmpty().lowercase(),
+                    to = o.optJSONObject("to")?.optString("hash", "").orEmpty().lowercase(),
+                    amount = BigDecimal(wei).movePointLeft(18),
+                    symbol = chain.symbol,
+                    failed = o.optString("status") == "error"
+                )
+            )
+        }
+
+        val transfers = runCatching {
+            fetchItems("$api/addresses/$address/token-transfers?type=ERC-20")
+        }.getOrDefault(emptyList())
+        for (o in transfers) {
+            val id = o.optString("transaction_hash", "").ifBlank { o.optString("tx_hash", "") }
+            val total = o.optJSONObject("total")
+            val token = o.optJSONObject("token")
+            val raw = runCatching { BigInteger(total?.optString("value", "").orEmpty()) }.getOrNull() ?: continue
+            val decimals = total?.optString("decimals", "")?.toIntOrNull()
+                ?: token?.optString("decimals", "")?.toIntOrNull()
+                ?: 18
+            if (id.isBlank()) continue
+            out.add(
+                historyRecord(
+                    id = id,
+                    ts = o.optString("timestamp", ""),
+                    me = me,
+                    from = o.optJSONObject("from")?.optString("hash", "").orEmpty().lowercase(),
+                    to = o.optJSONObject("to")?.optString("hash", "").orEmpty().lowercase(),
+                    amount = BigDecimal(raw).movePointLeft(decimals),
+                    symbol = token?.optString("symbol", "")?.ifBlank { null } ?: "ERC20",
+                    failed = false
+                )
+            )
+        }
+        out
+    }
+
+    private fun fetchItems(url: String): List<JSONObject> {
+        val arr = JSONObject(Http.get(url)).optJSONArray("items") ?: return emptyList()
+        return (0 until arr.length()).map { arr.getJSONObject(it) }
+    }
+
+    private fun historyRecord(
+        id: String, ts: String, me: String, from: String, to: String,
+        amount: BigDecimal, symbol: String, failed: Boolean
+    ): TxRecord {
+        val direction = when {
+            from == me && to == me -> TxDirection.SELF
+            from == me -> TxDirection.OUT
+            else -> TxDirection.IN
+        }
+        val counterparty = if (direction == TxDirection.IN) from else to
+        return TxRecord(
+            id = id,
+            timeSec = runCatching { Instant.parse(ts).epochSecond }.getOrNull(),
+            direction = direction,
+            amount = amount,
+            symbol = symbol,
+            counterparty = counterparty.ifBlank { null },
+            status = if (failed) TxStatus.FAILED else TxStatus.CONFIRMED
+        )
+    }
+
     // ---- sending ERC-20 ----
 
     override suspend fun estimateTokenFee(
@@ -161,12 +254,26 @@ class EthereumProvider(
         return res.amountUsed.multiply(BigInteger.valueOf(12)).divide(BigInteger.TEN)
     }
 
-    // ---- sending ETH ----
+    /**
+     * Gas for a native transfer. Plain transfers return 21000 and are used as-is; anything higher
+     * (Arbitrum includes the L1 data cost in gas, contract recipients need more) gets a 20% buffer.
+     */
+    private fun gasForNative(from: String, to: String, wei: BigInteger): BigInteger {
+        val tx = Transaction.createEtherTransaction(from, null, null, null, to, wei)
+        val res = web3.ethEstimateGas(tx).send()
+        if (res.hasError()) throw IllegalStateException("Transfer would fail: ${res.error.message}")
+        val g = res.amountUsed
+        return if (g <= BigInteger.valueOf(21_000)) g else g.multiply(BigInteger.valueOf(12)).divide(BigInteger.TEN)
+    }
+
+    // ---- sending native coin ----
 
     override suspend fun estimateFee(address: String, to: String, amount: BigDecimal): BigDecimal? =
         withContext(Dispatchers.IO) {
+            val wei = Convert.toWei(amount, Convert.Unit.ETHER).toBigIntegerExact()
+            val gas = gasForNative(address, to, wei)
             val gasPrice = web3.ethGasPrice().send().gasPrice
-            Convert.fromWei(BigDecimal(gasPrice.multiply(BigInteger.valueOf(21_000))), Convert.Unit.ETHER)
+            Convert.fromWei(BigDecimal(gas.multiply(gasPrice)), Convert.Unit.ETHER)
         }
 
     override fun isValidAddress(address: String): Boolean = WalletUtils.isValidAddress(address)
@@ -177,19 +284,20 @@ class EthereumProvider(
             val wei = Convert.toWei(amount, Convert.Unit.ETHER).toBigIntegerExact()
             val gasPrice = web3.ethGasPrice().send().gasPrice
             val txManager = RawTransactionManager(web3, creds, chainId)
-            val res = txManager.sendTransaction(gasPrice, BigInteger.valueOf(21_000), to, "", wei)
+            val gas = gasForNative(creds.address, to, wei)
+            val res = txManager.sendTransaction(gasPrice, gas, to, "", wei)
             if (res.hasError()) throw IllegalStateException(res.error.message)
             res.transactionHash
         }
 
-    private companion object {
-        const val ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+    companion object {
+        private const val ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
-        val DECIMALS_FN = Function(
+        private val DECIMALS_FN = Function(
             "decimals", emptyList<Type<*>>(),
             listOf<TypeReference<*>>(TypeReference.create(Uint8::class.java))
         )
-        val SYMBOL_FN = Function(
+        private val SYMBOL_FN = Function(
             "symbol", emptyList<Type<*>>(),
             listOf<TypeReference<*>>(TypeReference.create(Utf8String::class.java))
         )
@@ -199,6 +307,14 @@ class EthereumProvider(
             TokenInfo("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", "USDC", 6),
             TokenInfo("0x779877A7B0D9E8603169DdbD7836e478b4624789", "LINK", 18),
             TokenInfo("0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", "WETH", 18)
+        )
+
+        // Ethereum mainnet. Verify each address on etherscan.io before trusting a balance.
+        val MAINNET_TOKENS = listOf(
+            TokenInfo("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6),
+            TokenInfo("0xdAC17F958D2ee523a2206206994597C13D831ec7", "USDT", 6),
+            TokenInfo("0x514910771AF9Ca656af840dff83E8264EcF986CA", "LINK", 18),
+            TokenInfo("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "WETH", 18)
         )
     }
 }

@@ -21,11 +21,14 @@ class BitcoinProvider(
     private val hrp: String = "tb",
     private val coinType: Int = 1,
     private val p2pkhVersion: Int = 0x6f,
-    private val p2shVersion: Int = 0xc4
+    private val p2shVersion: Int = 0xc4,
+    private val explorerTxUrl: String = "https://mempool.space/testnet/tx/"
 ) : ChainProvider {
 
     override val chain = Chain.BTC
     override val supportsSend = true
+    override val isTestnet = hrp != "bc"
+    override val networkName = if (isTestnet) "Testnet" else "Mainnet"
 
     private class Plan(val inputs: List<Utxo>, val fee: Long, val change: Long)
 
@@ -79,6 +82,60 @@ class BitcoinProvider(
             check(txid.length == 64) { "Unexpected broadcast response: ${txid.take(100)}" }
             txid
         }
+
+    // ---- history ----
+
+    override fun explorerUrl(txId: String) = explorerTxUrl + txId
+
+    /** Uses mempool.space: up to 25 unconfirmed + 25 confirmed transactions. */
+    override suspend fun getHistory(address: String): List<TxRecord> = withContext(Dispatchers.IO) {
+        val arr = JSONArray(Http.get("$apiBase/address/$address/txs"))
+        (0 until arr.length()).map { arr.getJSONObject(it) }.map { tx ->
+            var received = 0L   // outputs paying us
+            var spent = 0L      // our coins used as inputs
+            var firstOther: String? = null  // first recipient that isn't us
+            var firstFrom: String? = null   // first sender that isn't us
+
+            val vout = tx.getJSONArray("vout")
+            for (i in 0 until vout.length()) {
+                val o = vout.getJSONObject(i)
+                val a = o.optString("scriptpubkey_address", "")
+                if (a == address) received += o.optLong("value")
+                else if (firstOther == null && a.isNotEmpty()) firstOther = a
+            }
+            val vin = tx.getJSONArray("vin")
+            for (i in 0 until vin.length()) {
+                val prev = vin.getJSONObject(i).optJSONObject("prevout") ?: continue
+                val a = prev.optString("scriptpubkey_address", "")
+                if (a == address) spent += prev.optLong("value")
+                else if (firstFrom == null && a.isNotEmpty()) firstFrom = a
+            }
+
+            val fee = tx.optLong("fee")
+            val status = tx.optJSONObject("status")
+            val confirmed = status?.optBoolean("confirmed") ?: false
+            val time = if (confirmed) status?.optLong("block_time") else null
+
+            val sent = spent - received - fee // value that left to other people
+            val direction: TxDirection
+            val sats: Long
+            val counterparty: String?
+            when {
+                spent == 0L -> { direction = TxDirection.IN; sats = received; counterparty = firstFrom }
+                sent > 0 -> { direction = TxDirection.OUT; sats = sent; counterparty = firstOther }
+                else -> { direction = TxDirection.SELF; sats = 0; counterparty = null }
+            }
+            TxRecord(
+                id = tx.getString("txid"),
+                timeSec = time,
+                direction = direction,
+                amount = BigDecimal.valueOf(sats).movePointLeft(8),
+                symbol = "BTC",
+                counterparty = counterparty,
+                status = if (confirmed) TxStatus.CONFIRMED else TxStatus.PENDING
+            )
+        }
+    }
 
     // ---- internals ----
 
