@@ -5,7 +5,13 @@ import java.math.BigDecimal
 import java.math.BigInteger
 
 /** An asset that can be swapped. [id] is the token contract, or null for the chain's native coin. */
-data class SwapAsset(val id: String?, val symbol: String, val decimals: Int)
+data class SwapAsset(
+    val id: String?,
+    val symbol: String,
+    val decimals: Int,
+    /** False for tokens the user added by hand: they are not on the built-in list and get a warning. */
+    val curated: Boolean = true
+)
 
 class SwapQuote(
     val chain: Chain,

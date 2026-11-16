@@ -27,6 +27,7 @@ class BitcoinProvider(
 
     override val chain = Chain.BTC
     override val supportsSend = true
+    override val nativeDecimals = 8
     override val isTestnet = hrp != "bc"
     override val networkName = if (isTestnet) "Testnet" else "Mainnet"
 

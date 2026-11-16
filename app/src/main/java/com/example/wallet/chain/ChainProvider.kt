@@ -76,6 +76,12 @@ interface ChainProvider {
     /** True if [quoteSwap] / [executeSwap] work on this network (EVM mainnets only). */
     val supportsSwap: Boolean get() = false
 
+    /** Name of the swap aggregator shown in the UI ("ParaSwap", "Jupiter"). */
+    val swapProviderName: String get() = ""
+
+    /** Decimals of the native coin (18 for EVM chains, 9 for SOL, 8 for BTC). */
+    val nativeDecimals: Int get() = 18
+
     /** Assets the user can swap between on this network (native coin + curated tokens). */
     fun swapAssets(): List<SwapAsset> = emptyList()
 

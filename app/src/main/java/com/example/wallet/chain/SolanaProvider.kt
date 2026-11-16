@@ -21,7 +21,9 @@ class SolanaProvider(
     private val rpcUrl: String = "https://api.devnet.solana.com",
     /** Friendly names for common mints; unknown mints show a shortened mint address. */
     private val knownMints: Map<String, String> = DEFAULT_KNOWN_MINTS,
-    private val explorerSuffix: String = "?cluster=devnet"
+    private val explorerSuffix: String = "?cluster=devnet",
+    /** Jupiter swap API base URL (keyless "lite" tier). Change it if Jupiter moves or requires a key. */
+    private val jupiterBaseUrl: String = "https://lite-api.jup.ag/swap/v1"
 ) : ChainProvider {
 
     override val chain = Chain.SOL
@@ -220,6 +222,166 @@ class SolanaProvider(
         }
     }
 
+    // ---- swaps (Jupiter, mainnet only) ----
+
+    override val supportsSwap: Boolean get() = !isTestnet
+    override val swapProviderName = "Jupiter"
+    override val nativeDecimals = 9
+
+    private val jupiter: JupiterApi by lazy { JupiterApi(jupiterBaseUrl) }
+
+    override fun swapAssets(): List<SwapAsset> =
+        if (!supportsSwap) emptyList()
+        else listOf(
+            SwapAsset(null, "SOL", 9),
+            SwapAsset("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "USDC", 6),
+            SwapAsset("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", "USDT", 6),
+            SwapAsset("JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", "JUP", 6),
+            SwapAsset("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "BONK", 5),
+            SwapAsset("EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", "WIF", 6),
+            SwapAsset("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", "mSOL", 9),
+            SwapAsset("J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", "JitoSOL", 9)
+        )
+
+    private fun mintOf(a: SwapAsset) = a.id ?: SolanaSwapGuard.WSOL_MINT
+
+    override suspend fun quoteSwap(
+        userAddress: String, from: SwapAsset, to: SwapAsset, amount: BigDecimal
+    ): SwapQuote = withContext(Dispatchers.IO) {
+        check(supportsSwap) { "Swaps are only available on Solana mainnet" }
+        require(mintOf(from) != mintOf(to)) { "Choose two different assets" }
+        require(from.id != SolanaSwapGuard.WSOL_MINT) { "Unwrap wrapped SOL first, then swap native SOL" }
+        verifyMint(from)
+        verifyMint(to)
+        val raw = toRaw(amount, from.decimals)
+        val q = jupiter.quote(mintOf(from), mintOf(to), raw, SWAP_SLIPPAGE_BPS)
+        SwapQuote(chain, from, to, raw, q.outAmount, SWAP_SLIPPAGE_BPS, needsApproval = false, gasUsd = null)
+    }
+
+    /**
+     * Every token mint in our lists is hand-maintained, and a mistyped base58 string still looks like a mint.
+     * So confirm on-chain that it exists, is a mint, and has the decimals we expect before quoting.
+     */
+    private fun verifyMint(asset: SwapAsset) {
+        val mint = asset.id ?: return
+        val value = rpc("getAccountInfo", """["$mint",{"encoding":"jsonParsed"}]""")
+            .getJSONObject("result").optJSONObject("value")
+            ?: throw IllegalStateException("${asset.symbol} mint was not found on this network")
+        val parsed = value.optJSONObject("data")?.optJSONObject("parsed")
+            ?: throw IllegalStateException("${asset.symbol} is not a token mint")
+        check(parsed.optString("type") == "mint") { "${asset.symbol} is not a token mint" }
+        check(parsed.getJSONObject("info").getInt("decimals") == asset.decimals) {
+            "${asset.symbol} has unexpected decimals, refusing to swap"
+        }
+    }
+
+    override suspend fun executeSwap(seed: ByteArray, quote: SwapQuote): SwapResult = withContext(Dispatchers.IO) {
+        check(supportsSwap) { "Swaps are only available on Solana mainnet" }
+        val sk = privateKey(seed)
+        try {
+            val pk = publicKey(sk)
+            val user = Base58.encode(pk)
+
+            // 1. Fresh quote; refuse if the price moved against the user since they confirmed.
+            val q = jupiter.quote(mintOf(quote.from), mintOf(quote.to), quote.amountInRaw, SWAP_SLIPPAGE_BPS)
+            val floor = quote.expectedOutRaw.multiply(BigInteger.valueOf(99)).divide(BigInteger.valueOf(100))
+            check(q.outAmount >= floor) { "The price moved by more than 1%. Please request a new quote." }
+
+            // 2. Layer one: allow-listed programs and instruction types only.
+            val raw = jupiter.swapTransaction(q, user)
+            SolanaSwapGuard.validateTransaction(raw, pk)?.let { throw IllegalStateException(it) }
+
+            // 3. Layer two: simulate and verify the balance changes are exactly what was asked for.
+            val minOut = SwapGuard.minOut(q.outAmount, SWAP_SLIPPAGE_BPS)
+            simulateAndVerify(raw, user, quote.from, quote.to, quote.amountInRaw, minOut)
+
+            // 4. Sign and send.
+            val signed = SolanaTx.signSwapTransaction(raw, sk, pk)
+            val b64 = Base64.getEncoder().encodeToString(signed)
+            val sig = rpc("sendTransaction", """["$b64",{"encoding":"base64"}]""").getString("result")
+            SwapResult(emptyList(), sig)
+        } finally {
+            sk.fill(0)
+        }
+    }
+
+    private fun simulateAndVerify(
+        txBytes: ByteArray, user: String, from: SwapAsset, to: SwapAsset, amountIn: BigInteger, minOut: BigInteger
+    ) {
+        // Every account the swap could plausibly touch: the wallet, all our token accounts, and the
+        // associated accounts for the two mints (which may not exist yet).
+        val addresses = LinkedHashSet<String>()
+        addresses.add(user)
+        for (program in listOf(TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID)) {
+            val arr = rpc(
+                "getTokenAccountsByOwner",
+                """["$user",{"programId":"$program"},{"encoding":"jsonParsed"}]"""
+            ).getJSONObject("result").getJSONArray("value")
+            for (i in 0 until arr.length()) addresses.add(arr.getJSONObject(i).getString("pubkey"))
+        }
+        val owner = Base58.decode(user)!!
+        val tokenProgram = Base58.decode(TOKEN_PROGRAM_ID)!!
+        for (mint in listOf(from.id, to.id, SolanaSwapGuard.WSOL_MINT)) {
+            if (mint != null) addresses.add(Base58.encode(SolanaTx.associatedTokenAddress(owner, Base58.decode(mint)!!, tokenProgram)))
+        }
+        check(addresses.size <= 100) { "Too many token accounts to verify this swap safely" }
+        val list = addresses.toList()
+
+        val quoted = JSONArray(list).toString()
+        val pre = parseAccounts(
+            list,
+            rpc("getMultipleAccounts", """[$quoted,{"encoding":"jsonParsed","commitment":"confirmed"}]""")
+                .getJSONObject("result").getJSONArray("value")
+        )
+
+        val config = JSONObject()
+            .put("encoding", "base64")
+            .put("sigVerify", false)
+            .put("replaceRecentBlockhash", true)
+            .put("commitment", "confirmed")
+            .put("accounts", JSONObject().put("encoding", "jsonParsed").put("addresses", JSONArray(list)))
+        val params = JSONArray().put(Base64.getEncoder().encodeToString(txBytes)).put(config)
+        val value = rpc("simulateTransaction", params.toString()).getJSONObject("result").getJSONObject("value")
+        if (!value.isNull("err")) throw IllegalStateException("Swap simulation failed: ${value.get("err")}")
+        val postArr = value.getJSONArray("accounts")
+        check(postArr.length() == list.size) { "Unexpected simulation result" }
+        val post = parseAccounts(list, postArr)
+
+        SolSimulationGuard.check(
+            pre, post, user,
+            srcMint = mintOf(from), srcNative = from.id == null,
+            dstMint = mintOf(to), dstNative = to.id == null,
+            amountIn = amountIn, minOut = minOut
+        )?.let { throw IllegalStateException(it) }
+    }
+
+    private fun parseAccounts(addresses: List<String>, arr: JSONArray): Map<String, AccountState?> {
+        val out = LinkedHashMap<String, AccountState?>()
+        for ((i, address) in addresses.withIndex()) {
+            out[address] = if (arr.isNull(i)) null else parseAccountState(arr.getJSONObject(i))
+        }
+        return out
+    }
+
+    private fun parseAccountState(o: JSONObject): AccountState {
+        var token: TokenState? = null
+        val data = o.opt("data")
+        if (data is JSONObject && data.optString("program").startsWith("spl-token")) {
+            val parsed = data.getJSONObject("parsed")
+            if (parsed.optString("type") == "account") {
+                val info = parsed.getJSONObject("info")
+                token = TokenState(
+                    mint = info.getString("mint"),
+                    owner = info.getString("owner"),
+                    amount = BigInteger(info.getJSONObject("tokenAmount").getString("amount")),
+                    delegate = info.optString("delegate").ifBlank { null },
+                    closeAuthority = info.optString("closeAuthority").ifBlank { null }
+                )
+            }
+        }
+        return AccountState(o.getLong("lamports"), o.optString("owner").ifBlank { null }, token)
+    }
+
     // ---- SPL transfers ----
 
     override suspend fun estimateTokenFee(
@@ -385,6 +547,7 @@ class SolanaProvider(
     companion object {
         private const val TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
         private const val TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+        private const val SWAP_SLIPPAGE_BPS = 50 // 0.5%
         private const val SIGNATURE_FEE_LAMPORTS = 5_000L
         private const val RENT_NOISE_LAMPORTS = 3_000_000L // ~ rent for a couple of token accounts
 
@@ -394,7 +557,12 @@ class SolanaProvider(
         val DEFAULT_KNOWN_MINTS: Map<String, String> = mapOf(
             "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU" to "USDC", // devnet
             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" to "USDC", // mainnet
-            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" to "USDT"  // mainnet
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" to "USDT", // mainnet
+            "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN" to "JUP",
+            "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263" to "BONK",
+            "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm" to "WIF",
+            "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So" to "mSOL",
+            "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn" to "JitoSOL"
         )
     }
 }

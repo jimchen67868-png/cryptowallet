@@ -32,6 +32,7 @@ They are plain JVM unit tests, no device or network needed:
 - Base58 (Bitcoin Core vectors), Bech32/Bech32m (BIP-173/350 valid + invalid), every Bitcoin address type and wrong-network rejection
 - Bitcoin: the BIP-143 sighash and the exact RFC 6979 signature, a full signed 2-input transaction, coin selection invariants
 - Solana: RFC 8032 Ed25519 vector, SOL transfer and SPL transfer (+ account creation) transactions, PDA derivation
+- Swap guards: EVM calldata decoding (many reject cases), Solana transaction allow-list, parser, and simulation balance checks
 - ERC-20 `transfer` calldata, EIP-55 checksum of every hard-coded token address, price-lookup rules
 Expected values come from published specs or from `tools/verify` (an independent Python reference implementation).
 **Passing tests do not make the wallet safe**: they cover encoding and signing, not the Android key storage, network code or UI.
@@ -48,6 +49,31 @@ Because the wallet signs calldata supplied by a third-party API, `SwapGuard` re-
 - swap targets are limited to the native coin and the curated token list
 Not verified against the live API from the development environment: the first real swap should be a few dollars.
 If ParaSwap changes its calldata format, swaps are rejected rather than signed.
+
+## Swaps on Solana (mainnet, via Jupiter)
+SOL <-> USDC / USDT, and any token you hold into those. Jupiter returns a complete transaction, so the checks are layered:
+1. **Instruction allow-list** (`SolanaSwapGuard`): the fee payer must be you and the only signer; only the ComputeBudget, System (Transfer only),
+   Token (SyncNative, CloseAccount back to you), Associated Token Account (for you) and Jupiter v6 programs may appear; priority fee is capped.
+2. **Simulation** (`SolSimulationGuard`): the transaction is simulated and compared with your accounts beforehand. It must spend at most the
+   swap amount (+ small fees), return at least the minimum, and leave every other balance, owner, delegate and open account untouched.
+3. Then it is signed. The price must also not move more than 1% between the quote and signing.
+Unlike the EVM side, the Jupiter response format was not verified against the live API from the development environment, and the keyless
+endpoint (`lite-api.jup.ag`) may change or need an API key: set `jupiterBaseUrl` in `SolanaProvider`. Anything unexpected is rejected, never signed.
+
+## Swaps on testnets (Uniswap v3)
+ParaSwap and Jupiter have no testnet liquidity, so on Sepolia, Base Sepolia and Arbitrum Sepolia swaps go straight to the official
+Uniswap v3 contracts (QuoterV2 for the price, SwapRouter02 to trade). The wallet builds the calldata itself, so there is no third-party
+transaction to trust. It picks the best of the four fee tiers, approves the exact amount, and sets the minimum output from a fresh
+on-chain quote (1% slippage).
+- **ETH <-> WETH** is a plain wrap/unwrap on the WETH contract (always works, handy for testing the flow).
+- Any other pair works only if somebody created a pool for it: otherwise you get "No Uniswap v3 pool with liquidity". Tokens you add
+  with *Add token* appear in the swap list marked "(custom)". Create a pool at app.uniswap.org on the same testnet if you need one.
+- Solana devnet has no swap support (no deployed aggregator liquidity). Bitcoin has no swaps.
+
+## More swap tokens
+Mainnet EVM lists now include DAI, WBTC, UNI, AAVE, BTCB, WBNB, LINK where each exists (EIP-55 checked in the tests). Solana adds JUP,
+BONK, WIF, mSOL and JitoSOL; because a mistyped base58 mint still looks valid, every Solana mint is verified on-chain (exists, is a mint,
+expected decimals) before a quote is requested. Tokens you add yourself can be swap targets but carry a warning.
 
 ## EVM networks
 Ethereum, Base, Arbitrum, Polygon and BNB Chain, on mainnet and testnet. All share one address (`m/44'/60'/0'/0/0`)

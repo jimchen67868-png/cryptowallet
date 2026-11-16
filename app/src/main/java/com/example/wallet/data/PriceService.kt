@@ -1,6 +1,7 @@
 package com.example.wallet.data
 
 import com.example.wallet.chain.Chain
+import com.example.wallet.chain.EthereumProvider
 import com.example.wallet.chain.Http
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -20,7 +21,9 @@ object CoinIds {
 
     // Our own curated token lists only: the symbol is matched here, never for user-supplied tokens.
     private val SYMBOL_IDS = mapOf(
-        "USDC" to "usd-coin", "USDT" to "tether", "LINK" to "chainlink", "WETH" to "weth", "ARB" to "arbitrum"
+        "USDC" to "usd-coin", "USDT" to "tether", "LINK" to "chainlink", "WETH" to "weth", "ARB" to "arbitrum",
+        "DAI" to "dai", "WBTC" to "wrapped-bitcoin", "UNI" to "uniswap", "AAVE" to "aave",
+        "BTCB" to "binance-bitcoin", "WBNB" to "wbnb", "ETH" to "ethereum" // "ETH" = the bridged ETH token on BNB Chain
     )
 
     private fun curated(chain: Chain, list: List<TokenInfo>): Map<String, String> =
@@ -39,8 +42,14 @@ object CoinIds {
         // Solana (case-sensitive mints): mainnet USDC/USDT, devnet USDC
         "SOL:EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" to "usd-coin",
         "SOL:Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" to "tether",
-        "SOL:4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU" to "usd-coin"
-    ) + curated(Chain.POL, EvmTokens.POLYGON) +
+        "SOL:4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU" to "usd-coin",
+        "SOL:JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN" to "jupiter-exchange-solana",
+        "SOL:DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263" to "bonk",
+        "SOL:EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm" to "dogwifcoin",
+        "SOL:mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So" to "msol",
+        "SOL:J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn" to "jito-staked-sol"
+    ) + curated(Chain.ETH, EthereumProvider.MAINNET_TOKENS) +
+        curated(Chain.POL, EvmTokens.POLYGON) +
         curated(Chain.BNB, EvmTokens.BNB) +
         curated(Chain.BASE, EvmTokens.BASE) +
         curated(Chain.ARB, EvmTokens.ARBITRUM)

@@ -46,7 +46,9 @@ class EthereumProvider(
     override val isTestnet: Boolean = true,
     testnetName: String = "Sepolia testnet",
     /** ParaSwap network id (1, 8453, 42161, 137, 56). Null disables swaps, e.g. on testnets. */
-    private val swapNetworkId: Int? = null
+    private val swapNetworkId: Int? = null,
+    /** Uniswap v3 deployment, used on testnets where no aggregator has liquidity. Null disables it. */
+    private val uniswap: UniswapV3Config? = null
 ) : ChainProvider {
 
     override val chain = evmChain
@@ -206,15 +208,36 @@ class EthereumProvider(
 
     // ---- swaps (ParaSwap) ----
 
-    override val supportsSwap: Boolean get() = swapNetworkId != null
+    override val supportsSwap: Boolean get() = swapNetworkId != null || uniswap != null
+    override val swapProviderName: String get() = if (swapNetworkId != null) "ParaSwap" else "Uniswap v3"
 
     private val paraSwap: ParaSwapApi? by lazy { swapNetworkId?.let { ParaSwapApi(it) } }
 
-    override fun swapAssets(): List<SwapAsset> =
-        if (!supportsSwap) emptyList()
-        else listOf(SwapAsset(null, chain.symbol, 18)) + knownTokens.map { SwapAsset(it.address, it.symbol, it.decimals) }
+    /** Native coin, the curated tokens, WETH (for wrap/unwrap on Uniswap networks) and tokens the user added. */
+    override fun swapAssets(): List<SwapAsset> {
+        if (!supportsSwap) return emptyList()
+        val curated = listOf(SwapAsset(null, chain.symbol, 18)) +
+            knownTokens.map { SwapAsset(it.address, it.symbol, it.decimals) }
+        val have = curated.mapNotNull { it.id?.lowercase() }.toSet()
+        val custom = tokenStore.list(chain)
+            .filter { it.address.lowercase() !in have }
+            .map { SwapAsset(it.address, it.symbol, it.decimals, curated = false) }
+        val weth = uniswap?.weth
+            ?.takeIf { w -> (curated + custom).none { it.id.equals(w, ignoreCase = true) } }
+            ?.let { SwapAsset(it, "WETH", 18) }
+        return curated + listOfNotNull(weth) + custom
+    }
 
     override suspend fun quoteSwap(
+        userAddress: String, from: SwapAsset, to: SwapAsset, amount: BigDecimal
+    ): SwapQuote =
+        if (swapNetworkId != null) quoteParaSwap(userAddress, from, to, amount)
+        else quoteUniswap(userAddress, from, to, amount)
+
+    override suspend fun executeSwap(seed: ByteArray, quote: SwapQuote): SwapResult =
+        if (swapNetworkId != null) executeParaSwap(seed, quote) else executeUniswap(seed, quote)
+
+    private suspend fun quoteParaSwap(
         userAddress: String, from: SwapAsset, to: SwapAsset, amount: BigDecimal
     ): SwapQuote = withContext(Dispatchers.IO) {
         val api = paraSwap ?: throw UnsupportedOperationException("Swaps are not available on ${chain.label}")
@@ -230,7 +253,7 @@ class EthereumProvider(
         SwapQuote(chain, from, to, raw, route.destAmount, SWAP_SLIPPAGE_BPS, needsApproval, route.gasUsd)
     }
 
-    override suspend fun executeSwap(seed: ByteArray, quote: SwapQuote): SwapResult = withContext(Dispatchers.IO) {
+    private suspend fun executeParaSwap(seed: ByteArray, quote: SwapQuote): SwapResult = withContext(Dispatchers.IO) {
         val api = paraSwap ?: throw UnsupportedOperationException("Swaps are not available on ${chain.label}")
         val creds = credentials(seed)
         val user = creds.address
@@ -272,6 +295,112 @@ class EthereumProvider(
         val res = txManager.sendTransaction(gasPrice, gas, tx.to, tx.data, tx.value)
         if (res.hasError()) throw IllegalStateException(res.error.message)
         SwapResult(approvals, res.transactionHash)
+    }
+
+    // ---- swaps on testnets (Uniswap v3): calldata is built here, nothing third-party is signed ----
+
+    private fun isWrap(cfg: UniswapV3Config, from: SwapAsset, to: SwapAsset) =
+        from.id == null && to.id.equals(cfg.weth, ignoreCase = true)
+
+    private fun isUnwrap(cfg: UniswapV3Config, from: SwapAsset, to: SwapAsset) =
+        to.id == null && from.id.equals(cfg.weth, ignoreCase = true)
+
+    private suspend fun quoteUniswap(
+        userAddress: String, from: SwapAsset, to: SwapAsset, amount: BigDecimal
+    ): SwapQuote = withContext(Dispatchers.IO) {
+        val cfg = uniswap ?: throw UnsupportedOperationException("Swaps are not available on ${chain.label} $networkName")
+        require(SwapGuard.tokenKey(from) != SwapGuard.tokenKey(to)) { "Choose two different assets" }
+        val raw = rawAmount(amount, from.decimals)
+        // ETH <-> WETH is a 1:1 wrap/unwrap on the WETH contract: no pool, no slippage.
+        if (isWrap(cfg, from, to) || isUnwrap(cfg, from, to)) {
+            return@withContext SwapQuote(chain, from, to, raw, raw, 0, false, null)
+        }
+        val best = bestUniswapQuote(cfg, from, to, raw)
+        val needsApproval = from.id != null && allowance(from.id, userAddress, cfg.router) < raw
+        SwapQuote(chain, from, to, raw, best.second, UNISWAP_SLIPPAGE_BPS, needsApproval, null)
+    }
+
+    private suspend fun executeUniswap(seed: ByteArray, quote: SwapQuote): SwapResult = withContext(Dispatchers.IO) {
+        val cfg = uniswap ?: throw UnsupportedOperationException("Swaps are not available on ${chain.label} $networkName")
+        val creds = credentials(seed)
+        val user = creds.address
+        val txManager = RawTransactionManager(web3, creds, chainId)
+        val from = quote.from
+        val to = quote.to
+        val amount = quote.amountInRaw
+
+        if (isWrap(cfg, from, to)) {
+            return@withContext SwapResult(emptyList(), sendCall(txManager, user, cfg.weth, amount, UniswapV3Abi.wethDeposit()))
+        }
+        if (isUnwrap(cfg, from, to)) {
+            return@withContext SwapResult(
+                emptyList(), sendCall(txManager, user, cfg.weth, BigInteger.ZERO, UniswapV3Abi.wethWithdraw(amount))
+            )
+        }
+
+        // Fresh on-chain quote; refuse if the price moved against the user since they confirmed.
+        val (fee, out) = bestUniswapQuote(cfg, from, to, amount)
+        val floor = quote.expectedOutRaw.multiply(BigInteger.valueOf(99)).divide(BigInteger.valueOf(100))
+        check(out >= floor) { "The price moved by more than 1%. Please request a new quote." }
+
+        // ERC-20 source: approve exactly this amount to the router (never unlimited).
+        val approvals = ArrayList<String>()
+        val srcToken = from.id
+        if (srcToken != null) {
+            val current = allowance(srcToken, user, cfg.router)
+            if (current < amount) {
+                if (current.signum() > 0) approvals.add(sendApproval(txManager, user, srcToken, cfg.router, BigInteger.ZERO))
+                approvals.add(sendApproval(txManager, user, srcToken, cfg.router, amount))
+            }
+        }
+
+        val minOut = SwapGuard.minOut(out, quote.slippageBps)
+        val tokenIn = srcToken ?: cfg.weth   // native in: the router wraps the attached ETH
+        val tokenOut = to.id ?: cfg.weth
+        val data = if (to.id == null) {
+            // Native out: receive WETH inside the router, then unwrap it straight to the user.
+            UniswapV3Abi.multicall(
+                listOf(
+                    UniswapV3Abi.exactInputSingle(tokenIn, tokenOut, fee, UniswapV3Abi.ADDRESS_THIS, amount, minOut),
+                    UniswapV3Abi.unwrapWeth9(minOut, user)
+                )
+            )
+        } else {
+            UniswapV3Abi.exactInputSingle(tokenIn, tokenOut, fee, user, amount, minOut)
+        }
+        val value = if (srcToken == null) amount else BigInteger.ZERO
+        SwapResult(approvals, sendCall(txManager, user, cfg.router, value, data))
+    }
+
+    /** Best output over the fee tiers that have a pool with liquidity. Returns (fee tier, amountOut). */
+    private fun bestUniswapQuote(cfg: UniswapV3Config, from: SwapAsset, to: SwapAsset, raw: BigInteger): Pair<Int, BigInteger> {
+        val tokenIn = from.id ?: cfg.weth
+        val tokenOut = to.id ?: cfg.weth
+        var best: Pair<Int, BigInteger>? = null
+        for (fee in UniswapV3Abi.FEE_TIERS) {
+            val out = runCatching {
+                val tx = Transaction.createEthCallTransaction(
+                    ZERO_ADDRESS, cfg.quoter, UniswapV3Abi.quoteExactInputSingle(tokenIn, tokenOut, raw, fee)
+                )
+                val res = web3.ethCall(tx, DefaultBlockParameterName.LATEST).send()
+                if (res.hasError()) null else UniswapV3Abi.firstWord(res.value)
+            }.getOrNull() ?: continue // no pool at this tier reverts
+            if (out.signum() > 0 && (best == null || out > best.second)) best = fee to out
+        }
+        return best ?: throw IllegalStateException(
+            "No Uniswap v3 pool with liquidity for this pair on $networkName. " +
+                "Pick another pair, or create a pool at app.uniswap.org."
+        )
+    }
+
+    private fun sendCall(
+        txManager: RawTransactionManager, from: String, to: String, value: BigInteger, data: String
+    ): String {
+        val gas = gasForCall(from, to, value, data)
+        val gasPrice = web3.ethGasPrice().send().gasPrice
+        val res = txManager.sendTransaction(gasPrice, gas, to, data, value)
+        if (res.hasError()) throw IllegalStateException(res.error.message)
+        return res.transactionHash
     }
 
     private fun ensurePriceHeld(quote: SwapQuote, route: ParaSwapApi.Route) {
@@ -410,6 +539,7 @@ class EthereumProvider(
 
     companion object {
         private const val SWAP_SLIPPAGE_BPS = 50 // 0.5%
+        private const val UNISWAP_SLIPPAGE_BPS = 100 // 1%: testnet pools are thin
         private const val ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
         private val DECIMALS_FN = Function(
@@ -433,7 +563,11 @@ class EthereumProvider(
             TokenInfo("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6),
             TokenInfo("0xdAC17F958D2ee523a2206206994597C13D831ec7", "USDT", 6),
             TokenInfo("0x514910771AF9Ca656af840dff83E8264EcF986CA", "LINK", 18),
-            TokenInfo("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "WETH", 18)
+            TokenInfo("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "WETH", 18),
+            TokenInfo("0x6B175474E89094C44Da98b954EedeAC495271d0F", "DAI", 18),
+            TokenInfo("0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", "WBTC", 8),
+            TokenInfo("0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984", "UNI", 18),
+            TokenInfo("0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9", "AAVE", 18)
         )
     }
 }

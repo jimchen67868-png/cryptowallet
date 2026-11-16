@@ -286,12 +286,12 @@ class WalletViewModel(
     fun requestSwapQuote(chain: Chain, from: TokenBalance?, to: SwapAsset, amountText: String) {
         val provider = providers.first { it.chain == chain }
         val acc = accounts.firstOrNull { it.chain == chain } ?: return
-        if (network != Network.MAINNET || !provider.supportsSwap) {
-            message = "Swaps are only available on mainnet EVM networks."; return
+        if (!provider.supportsSwap) {
+            message = "Swaps are not available on this network."; return
         }
         val amount = amountText.trim().toBigDecimalOrNull()
         if (amount == null || amount.signum() <= 0) { message = "Enter a valid amount"; return }
-        val fromAsset = SwapAsset(from?.id, from?.symbol ?: chain.symbol, from?.decimals ?: 18)
+        val fromAsset = SwapAsset(from?.id, from?.symbol ?: chain.symbol, from?.decimals ?: provider.nativeDecimals)
         val balance = from?.balance ?: acc.balance
         if (balance != null && amount > balance) { message = "Amount exceeds your ${fromAsset.symbol} balance"; return }
         limitError(chain, from?.id, amount)?.let { message = it; return }
@@ -312,7 +312,7 @@ class WalletViewModel(
         val provider = providers.first { it.chain == q.chain }
         val s = seed?.copyOf() ?: return
         viewModelScope.launch {
-            if (!repo.confirmIdentity(activity, "Confirm mainnet swap")) {
+            if (network == Network.MAINNET && !repo.confirmIdentity(activity, "Confirm mainnet swap")) {
                 message = "Authentication cancelled. Nothing was sent."
                 s.fill(0)
                 return@launch

@@ -7,6 +7,8 @@ import com.example.wallet.chain.Chain
 import com.example.wallet.chain.ChainProvider
 import com.example.wallet.chain.EthereumProvider
 import com.example.wallet.chain.SolanaProvider
+import com.example.wallet.chain.UniswapDeployments
+import com.example.wallet.chain.UniswapV3Config
 import com.example.wallet.data.AppSettings
 import com.example.wallet.data.EvmTokens
 import com.example.wallet.data.Network
@@ -41,7 +43,7 @@ class AppContainer(context: Context) {
     private fun evm(
         chain: Chain, rpc: String, chainId: Long, tokens: TokenStore, testnet: Boolean,
         testnetName: String, known: List<TokenInfo>, historyApi: String?, explorerTx: String,
-        swapId: Int? = null
+        swapId: Int? = null, uniswap: UniswapV3Config? = null
     ) = EthereumProvider(
         tokenStore = tokens,
         rpcUrl = rpc,
@@ -52,16 +54,17 @@ class AppContainer(context: Context) {
         evmChain = chain,
         isTestnet = testnet,
         testnetName = testnetName,
-        swapNetworkId = swapId
+        swapNetworkId = swapId,
+        uniswap = uniswap
     )
 
     private val testnetProviders: List<ChainProvider> by lazy {
         listOf(
-            EthereumProvider(testnetTokens), BitcoinProvider(), SolanaProvider(),
+            EthereumProvider(testnetTokens, uniswap = UniswapDeployments.SEPOLIA), BitcoinProvider(), SolanaProvider(),
             evm(Chain.BASE, "https://base-sepolia-rpc.publicnode.com", 84532L, testnetTokens, true,
-                "Sepolia testnet", emptyList(), "https://base-sepolia.blockscout.com/api/v2", "https://sepolia.basescan.org/tx/"),
+                "Sepolia testnet", emptyList(), "https://base-sepolia.blockscout.com/api/v2", "https://sepolia.basescan.org/tx/", uniswap = UniswapDeployments.BASE_SEPOLIA),
             evm(Chain.ARB, "https://arbitrum-sepolia-rpc.publicnode.com", 421614L, testnetTokens, true,
-                "Sepolia testnet", emptyList(), "https://arbitrum-sepolia.blockscout.com/api/v2", "https://sepolia.arbiscan.io/tx/"),
+                "Sepolia testnet", emptyList(), "https://arbitrum-sepolia.blockscout.com/api/v2", "https://sepolia.arbiscan.io/tx/", uniswap = UniswapDeployments.ARBITRUM_SEPOLIA),
             evm(Chain.POL, "https://polygon-amoy-bor-rpc.publicnode.com", 80002L, testnetTokens, true,
                 "Amoy testnet", emptyList(), null, "https://amoy.polygonscan.com/tx/"),
             evm(Chain.BNB, "https://bsc-testnet-rpc.publicnode.com", 97L, testnetTokens, true,

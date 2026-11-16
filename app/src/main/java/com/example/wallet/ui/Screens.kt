@@ -471,9 +471,9 @@ private fun SwapScreen(vm: WalletViewModel, activity: FragmentActivity, chain: C
         Text("To:")
         options.forEachIndexed { i, o ->
             if (i == toIndex) {
-                Button(onClick = { toIndex = i }, modifier = Modifier.fillMaxWidth()) { Text(o.symbol) }
+                Button(onClick = { toIndex = i }, modifier = Modifier.fillMaxWidth()) { Text(o.symbol + if (o.curated) "" else " (custom)") }
             } else {
-                OutlinedButton(onClick = { toIndex = i }, modifier = Modifier.fillMaxWidth()) { Text(o.symbol) }
+                OutlinedButton(onClick = { toIndex = i }, modifier = Modifier.fillMaxWidth()) { Text(o.symbol + if (o.curated) "" else " (custom)") }
             }
         }
         OutlinedTextField(
@@ -495,8 +495,8 @@ private fun SwapScreen(vm: WalletViewModel, activity: FragmentActivity, chain: C
             modifier = Modifier.fillMaxWidth()
         ) { Text("Get quote") }
         Text(
-            "Routed through ParaSwap. Before anything is signed, the app checks the quote's router, tokens, amount, " +
-                "payout address and minimum output itself, and rejects the swap if anything is off.",
+            "Routed through ${provider.swapProviderName}. Before anything is signed, the app inspects the transaction " +
+                "itself and rejects the swap if anything is off.",
             style = MaterialTheme.typography.bodySmall
         )
         TextButton(onClick = vm::back) { Text("Back") }
@@ -505,11 +505,12 @@ private fun SwapScreen(vm: WalletViewModel, activity: FragmentActivity, chain: C
     vm.pendingSwap?.let { q ->
         AlertDialog(
             onDismissRequest = vm::cancelSwap,
-            title = { Text("Confirm MAINNET swap") },
+            title = { Text(if (vm.network == Network.MAINNET) "Confirm MAINNET swap" else "Confirm swap") },
             text = {
                 Text(
                     "Swap ${q.amountIn.plain()} ${q.from.symbol} for about ${q.expectedOut.plain()} ${q.to.symbol}\n\n" +
                         "Minimum you receive: ${q.minOut.plain()} ${q.to.symbol} (${q.slippageBps / 100.0}% slippage)\n" +
+                        (if (q.to.curated) "" else "\nWarning: ${q.to.symbol} is a token you added yourself, not on the built-in list. Check its contract address first.\n") +
                         (if (q.needsApproval) "\nFirst needs a token approval for exactly this amount, so 2 transactions.\n" else "") +
                         (q.gasUsd?.let { "\nEstimated network fee: about $" + it + "\n" } ?: "") +
                         "\nThis cannot be undone."

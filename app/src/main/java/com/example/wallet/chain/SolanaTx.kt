@@ -111,6 +111,26 @@ object SolanaTx {
         return sig
     }
 
+    /**
+     * Signs a ready-made transaction (e.g. from Jupiter) that has exactly one empty signature slot.
+     * Works for legacy and v0 messages: the signature covers everything after the signature section.
+     */
+    fun signSwapTransaction(tx: ByteArray, sk: ByteArray, pk: ByteArray): ByteArray {
+        var pos = 0
+        var count = 0
+        var shift = 0
+        while (true) {
+            val x = tx[pos++].toInt() and 0xff
+            count = count or ((x and 0x7f) shl shift)
+            if (x and 0x80 == 0) break
+            shift += 7
+            require(shift <= 14) { "bad signature count" }
+        }
+        require(count == 1) { "Expected exactly one signature slot" }
+        val message = tx.copyOfRange(pos + 64, tx.size)
+        return tx.copyOfRange(0, pos) + sign(sk, pk, message) + message
+    }
+
     /** Wire format for a single-signature transaction. */
     fun serialize(signature: ByteArray, message: ByteArray): ByteArray =
         shortVec(1) + signature + message
