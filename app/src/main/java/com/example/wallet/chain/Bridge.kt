@@ -149,7 +149,28 @@ internal class AcrossApi(private val baseUrl: String = "https://app.across.netwo
         )
     }
 
+    /** Fill status of a deposit, looked up by its origin-chain transaction hash. Any failure is UNKNOWN, never a guess. */
+    fun depositStatus(depositTxId: String): FillStatus {
+        if (!BridgeSwapLogic.TX_ID.matches(depositTxId)) return FillStatus.UNKNOWN
+        return AcrossStatus.parse(Http.get("$baseUrl/deposit/status?depositTxnRef=$depositTxId"))
+    }
+
     private companion object {
         const val ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+    }
+}
+
+/** Parses the `status` field of Across's /deposit/status response. Anything unrecognised is UNKNOWN. */
+internal object AcrossStatus {
+    fun parse(body: String): FillStatus = try {
+        when (JSONObject(body).optString("status").lowercase()) {
+            "filled" -> FillStatus.FILLED
+            "pending" -> FillStatus.PENDING
+            "expired" -> FillStatus.EXPIRED
+            "refunded" -> FillStatus.REFUNDED
+            else -> FillStatus.UNKNOWN
+        }
+    } catch (e: Exception) {
+        FillStatus.UNKNOWN
     }
 }

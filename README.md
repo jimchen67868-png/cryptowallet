@@ -88,6 +88,23 @@ Not verified against the live API from the development environment, and bridges 
 use a small amount first. LI.FI-style routes that swap during bridging are deliberately not offered: their calldata cannot be fully verified.
 BNB Chain and Solana are not bridge targets.
 
+### Bridge, then swap on arrival
+On the bridge screen, pick **"Swap to X"** under the destination to move funds *and* change asset. It is two separately
+authorised steps, because Across fills on the destination chain after the deposit and a swap cannot be part of that transaction:
+1. **Bridge** (as above: caps, `AcrossGuard`, fingerprint/PIN). Before sending, the wallet checks you have gas on the destination
+   chain (not needed when bridging native ETH to an ETH-gas chain), takes an indicative swap quote, and records your destination
+   balances. Nothing is sent if any of that fails.
+2. **Swap on arrival.** A job card appears on Home and the wallet polls Across `/deposit/status` plus your destination balance.
+   Arrival = balance up by >= 99.9% of the quoted amount **and** Across says `filled` (or Across is unreachable). When it lands
+   you tap **Review swap**: a FRESH ParaSwap quote is taken from the real arrived amount (never more than quoted), `SwapGuard`
+   checks the calldata as for any swap, the $100 cap is re-applied, and you confirm with fingerprint/PIN again. A warning shows
+   if the price is more than 3% worse than the preview.
+Jobs are saved (non-secret: chains, amounts, deposit tx id) so a bridge in flight survives the app being closed. Polling only
+runs while the app is unlocked; the wallet is locked in the background by design, so reopen it to resume. If the swap fails or you
+cancel, the funds simply stay on the destination chain and **Review swap** can be tried again. Native-coin arrivals keep a small
+reserve for the swap's network fee (0.006 ETH on Ethereum, 0.0002 on Base/Arbitrum, 0.05 POL on Polygon; a heuristic).
+Only built-in (curated) tokens can be the target. Not verified against the live APIs.
+
 ## EVM networks
 Ethereum, Base, Arbitrum, Polygon and BNB Chain, on mainnet and testnet. All share one address (`m/44'/60'/0'/0/0`)
 but balances are per network: **a token sent on the wrong network is not visible on another one.** Each network has its own card,

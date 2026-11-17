@@ -12,6 +12,7 @@ import com.example.wallet.chain.SolanaProvider
 import com.example.wallet.chain.UniswapDeployments
 import com.example.wallet.chain.UniswapV3Config
 import com.example.wallet.data.AppSettings
+import com.example.wallet.data.PrefsBridgeSwapStore
 import com.example.wallet.data.EvmTokens
 import com.example.wallet.data.Network
 import com.example.wallet.data.PriceService
@@ -36,6 +37,7 @@ class AppContainer(context: Context) {
     val repository = WalletRepository(SecureSeedStore(context), BiometricAuthenticator())
     val priceService = PriceService()
     val settings = AppSettings(context)
+    val bridgeJobs = PrefsBridgeSwapStore(context)
 
     // Custom tokens are stored per network so testnet contracts never leak into mainnet.
     private val testnetTokens = TokenStore(context)

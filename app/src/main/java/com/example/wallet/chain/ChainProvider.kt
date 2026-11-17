@@ -107,6 +107,9 @@ interface ChainProvider {
         throw UnsupportedOperationException("Bridging is not supported on ${chain.label}")
     }
 
+    /** Fill status of a bridge deposit made from this network (Across). UNKNOWN if it can't be determined. */
+    suspend fun bridgeFillStatus(depositTxId: String): FillStatus = FillStatus.UNKNOWN
+
     /** Block explorer page for a transaction id. */
     fun explorerUrl(txId: String): String
 

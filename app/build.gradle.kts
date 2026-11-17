@@ -60,6 +60,8 @@ dependencies {
     implementation("com.google.zxing:core:3.5.3") // QR codes
 
     testImplementation("junit:junit:4.13.2")
+    // The Android SDK jar only has stubs for org.json (they return null in unit tests), so use the real implementation.
+    testImplementation("org.json:json:20240303")
 
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.2")
 }

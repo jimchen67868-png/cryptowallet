@@ -50,7 +50,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
+import com.example.wallet.chain.BridgeSwapJob
+import com.example.wallet.chain.BridgeSwapLogic
 import com.example.wallet.chain.Chain
+import com.example.wallet.chain.JobStage
 import com.example.wallet.data.AppConfig
 import com.example.wallet.data.Network
 import com.example.wallet.chain.SwapAsset
@@ -59,6 +62,7 @@ import com.example.wallet.chain.TxDirection
 import com.example.wallet.chain.TxRecord
 import com.example.wallet.chain.TxStatus
 import com.google.zxing.BarcodeFormat
+import kotlinx.coroutines.delay
 import com.google.zxing.qrcode.QRCodeWriter
 
 @Composable
@@ -89,6 +93,7 @@ fun WalletRoot(vm: WalletViewModel, activity: FragmentActivity) {
                 Screen.NetworkSettings -> NetworkScreen(vm)
                 Screen.MainnetWarning -> MainnetWarningScreen(vm)
             }
+            ArrivalSwapDialog(vm, activity)
         }
     }
 }
@@ -228,6 +233,7 @@ private fun HomeScreen(vm: WalletViewModel) {
             )
         }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(vm.bridgeJobs, key = { it.id }) { job -> BridgeJobCard(vm, job) }
             items(vm.accounts) { acc ->
                 val bal = acc.balance
                 Card(Modifier.fillMaxWidth()) {
@@ -536,8 +542,10 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
     val symbol = from?.symbol ?: chain.symbol
     val destinations = provider.bridgeDestinations()
     var destIndex by remember { mutableStateOf(0) }
+    var thenIndex by remember { mutableStateOf(-1) }
     var amount by remember { mutableStateOf("") }
     val available = from?.balance ?: vm.accounts.firstOrNull { it.chain == chain }?.balance
+    val swapOptions = destinations.getOrNull(destIndex)?.let { vm.swapTargetsAfterBridge(chain, from, it) }.orEmpty()
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Move $symbol to another network", style = MaterialTheme.typography.headlineSmall)
@@ -545,9 +553,31 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
         Text("To network:")
         destinations.forEachIndexed { i, d ->
             if (i == destIndex) {
-                Button(onClick = { destIndex = i }, modifier = Modifier.fillMaxWidth()) { Text(d.label) }
+                Button(onClick = { destIndex = i; thenIndex = -1 }, modifier = Modifier.fillMaxWidth()) { Text(d.label) }
             } else {
-                OutlinedButton(onClick = { destIndex = i }, modifier = Modifier.fillMaxWidth()) { Text(d.label) }
+                OutlinedButton(onClick = { destIndex = i; thenIndex = -1 }, modifier = Modifier.fillMaxWidth()) { Text(d.label) }
+            }
+        }
+        if (swapOptions.isNotEmpty()) {
+            Text("Then swap on arrival (optional):")
+            if (thenIndex == -1) {
+                Button(onClick = { thenIndex = -1 }, modifier = Modifier.fillMaxWidth()) { Text("No, just move it") }
+            } else {
+                OutlinedButton(onClick = { thenIndex = -1 }, modifier = Modifier.fillMaxWidth()) { Text("No, just move it") }
+            }
+            swapOptions.forEachIndexed { i, o ->
+                if (i == thenIndex) {
+                    Button(onClick = { thenIndex = i }, modifier = Modifier.fillMaxWidth()) { Text("Swap to ${o.symbol}") }
+                } else {
+                    OutlinedButton(onClick = { thenIndex = i }, modifier = Modifier.fillMaxWidth()) { Text("Swap to ${o.symbol}") }
+                }
+            }
+            if (thenIndex >= 0) {
+                Text(
+                    "The swap is a second step once your funds arrive: the wallet takes a fresh quote and asks for your " +
+                        "fingerprint/PIN again. Nothing is swapped automatically.",
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
         }
         OutlinedTextField(
@@ -564,7 +594,7 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
         }
         if (vm.sending) CircularProgressIndicator()
         Button(
-            onClick = { destinations.getOrNull(destIndex)?.let { vm.requestBridgeQuote(chain, from, it, amount) } },
+            onClick = { destinations.getOrNull(destIndex)?.let { vm.requestBridgeQuote(chain, from, it, amount, swapOptions.getOrNull(thenIndex)) } },
             enabled = !vm.sending && amount.isNotBlank() && destinations.isNotEmpty(),
             modifier = Modifier.fillMaxWidth()
         ) { Text("Get quote") }
@@ -588,6 +618,12 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
                         "Bridge fee: ${q.fee.plain()} $symbol (${q.feePercent}%)\n" +
                         "Estimated time: ${etaText(q.etaSeconds)}\n" +
                         (if (q.needsApproval) "\nFirst needs a token approval for exactly this amount, so 2 transactions.\n" else "") +
+                        (vm.pendingCombo?.let { c ->
+                            "\nThen, once your funds arrive on ${q.destChain.label}: swap them to ${c.to.symbol} " +
+                                "(preview about ${c.preview.expectedOut.plain()} ${c.to.symbol}, not guaranteed). " +
+                                "That is a second step with a fresh quote and its own fingerprint/PIN prompt. " +
+                                "Arrival is only watched while the app is open and unlocked; if the funds land first they simply wait on ${q.destChain.label}.\n"
+                        } ?: "") +
                         "\nIf the transfer is not filled in time, Across refunds it to you on ${q.chain.label}. This cannot be undone."
                 )
             },
@@ -691,3 +727,76 @@ private fun QrCode(text: String, size: Dp) {
 }
 
 private fun shorten(a: String) = if (a.length > 18) a.take(9) + "…" + a.takeLast(7) else a
+
+@Composable
+private fun BridgeJobCard(vm: WalletViewModel, job: BridgeSwapJob) {
+    val uri = LocalUriHandler.current
+    var now by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
+    LaunchedEffect(job.id) {
+        while (true) {
+            delay(30_000)
+            now = System.currentTimeMillis() / 1000
+        }
+    }
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                "${job.originChain.label} → ${job.destChain.label}, then swap to ${job.target.symbol}",
+                style = MaterialTheme.typography.titleSmall
+            )
+            Text(BridgeSwapLogic.statusText(job, now), style = MaterialTheme.typography.bodyMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                when (job.stage) {
+                    JobStage.ARRIVED -> {
+                        Button(onClick = { vm.reviewArrivalSwap(job.id) }, enabled = !vm.sending) { Text("Review swap") }
+                        TextButton(onClick = { vm.dismissBridgeJob(job.id) }) { Text("Keep as is") }
+                    }
+                    JobStage.WAITING_FILL -> {
+                        TextButton(onClick = { uri.openUri(vm.explorerUrl(job.originChain, job.depositTxId)) }) { Text("View deposit") }
+                        TextButton(onClick = { vm.dismissBridgeJob(job.id) }) { Text("Stop tracking") }
+                    }
+                    JobStage.TIMED_OUT -> {
+                        TextButton(onClick = { vm.recheckBridgeJob(job.id) }) { Text("Check again") }
+                        TextButton(onClick = { uri.openUri(vm.explorerUrl(job.originChain, job.depositTxId)) }) { Text("View deposit") }
+                        TextButton(onClick = { vm.dismissBridgeJob(job.id) }) { Text("Dismiss") }
+                    }
+                    JobStage.DONE -> {
+                        job.swapTxId?.let { tx ->
+                            TextButton(onClick = { uri.openUri(vm.explorerUrl(job.destChain, tx)) }) { Text("View swap") }
+                        }
+                        TextButton(onClick = { vm.dismissBridgeJob(job.id) }) { Text("Dismiss") }
+                    }
+                    JobStage.BRIDGE_FAILED -> {
+                        TextButton(onClick = { uri.openUri(vm.explorerUrl(job.originChain, job.depositTxId)) }) { Text("View deposit") }
+                        TextButton(onClick = { vm.dismissBridgeJob(job.id) }) { Text("Dismiss") }
+                    }
+                    JobStage.SWAPPING -> CircularProgressIndicator(Modifier.size(24.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ArrivalSwapDialog(vm: WalletViewModel, activity: FragmentActivity) {
+    val p = vm.pendingArrival ?: return
+    val q = p.quote
+    AlertDialog(
+        onDismissRequest = vm::cancelArrivalSwap,
+        title = { Text("Swap your bridged funds") },
+        text = {
+            Text(
+                "Your funds arrived on ${q.chain.label}.\n\n" +
+                    "Swap ${q.amountIn.plain()} ${q.from.symbol} for about ${q.expectedOut.plain()} ${q.to.symbol}\n" +
+                    "Minimum you receive: ${q.minOut.plain()} ${q.to.symbol} (${q.slippageBps / 100.0}% slippage)\n" +
+                    (if (p.reservedRaw.signum() > 0) "\nA small amount of ${q.from.symbol} is kept back to pay the network fee.\n" else "") +
+                    (p.driftWarning?.let { "\nWarning: " + it + "\n" } ?: "") +
+                    (if (q.needsApproval) "\nFirst needs a token approval for exactly this amount, so 2 transactions.\n" else "") +
+                    (q.gasUsd?.let { "\nEstimated network fee: about $" + it + "\n" } ?: "") +
+                    "\nThis is a fresh quote taken just now. It cannot be undone."
+            )
+        },
+        confirmButton = { TextButton(onClick = { vm.confirmArrivalSwap(activity) }) { Text("Swap") } },
+        dismissButton = { TextButton(onClick = vm::cancelArrivalSwap) { Text("Cancel") } }
+    )
+}

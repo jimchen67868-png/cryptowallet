@@ -389,6 +389,10 @@ class EthereumProvider(
         SwapResult(approvals, sendCall(txManager, user, plan.route.spokePool, value, data))
     }
 
+    override suspend fun bridgeFillStatus(depositTxId: String): FillStatus = withContext(Dispatchers.IO) {
+        try { acrossApi.depositStatus(depositTxId) } catch (e: Exception) { FillStatus.UNKNOWN }
+    }
+
     // ---- swaps on testnets (Uniswap v3): calldata is built here, nothing third-party is signed ----
 
     private fun isWrap(cfg: UniswapV3Config, from: SwapAsset, to: SwapAsset) =
