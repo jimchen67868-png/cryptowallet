@@ -2,7 +2,9 @@ package com.example.wallet
 
 import android.app.Application
 import android.content.Context
+import com.example.wallet.chain.AcrossRoutes
 import com.example.wallet.chain.BitcoinProvider
+import com.example.wallet.chain.BridgeRoute
 import com.example.wallet.chain.Chain
 import com.example.wallet.chain.ChainProvider
 import com.example.wallet.chain.EthereumProvider
@@ -43,7 +45,8 @@ class AppContainer(context: Context) {
     private fun evm(
         chain: Chain, rpc: String, chainId: Long, tokens: TokenStore, testnet: Boolean,
         testnetName: String, known: List<TokenInfo>, historyApi: String?, explorerTx: String,
-        swapId: Int? = null, uniswap: UniswapV3Config? = null
+        swapId: Int? = null, uniswap: UniswapV3Config? = null,
+        bridgeRoutes: List<BridgeRoute> = emptyList()
     ) = EthereumProvider(
         tokenStore = tokens,
         rpcUrl = rpc,
@@ -55,7 +58,8 @@ class AppContainer(context: Context) {
         isTestnet = testnet,
         testnetName = testnetName,
         swapNetworkId = swapId,
-        uniswap = uniswap
+        uniswap = uniswap,
+        bridgeRoutes = bridgeRoutes
     )
 
     private val testnetProviders: List<ChainProvider> by lazy {
@@ -82,7 +86,8 @@ class AppContainer(context: Context) {
                 explorerApi = "https://eth.blockscout.com/api/v2",
                 explorerTxUrl = "https://etherscan.io/tx/",
                 isTestnet = false,
-                swapNetworkId = 1
+                swapNetworkId = 1,
+                bridgeRoutes = AcrossRoutes.MAINNET
             ),
             BitcoinProvider(
                 apiBase = "https://mempool.space/api",
@@ -97,11 +102,11 @@ class AppContainer(context: Context) {
                 explorerSuffix = ""
             ),
             evm(Chain.BASE, "https://base-rpc.publicnode.com", 8453L, mainnetTokens, false,
-                "Mainnet", EvmTokens.BASE, "https://base.blockscout.com/api/v2", "https://basescan.org/tx/", 8453),
+                "Mainnet", EvmTokens.BASE, "https://base.blockscout.com/api/v2", "https://basescan.org/tx/", 8453, bridgeRoutes = AcrossRoutes.MAINNET),
             evm(Chain.ARB, "https://arbitrum-one-rpc.publicnode.com", 42161L, mainnetTokens, false,
-                "Mainnet", EvmTokens.ARBITRUM, "https://arbitrum.blockscout.com/api/v2", "https://arbiscan.io/tx/", 42161),
+                "Mainnet", EvmTokens.ARBITRUM, "https://arbitrum.blockscout.com/api/v2", "https://arbiscan.io/tx/", 42161, bridgeRoutes = AcrossRoutes.MAINNET),
             evm(Chain.POL, "https://polygon-bor-rpc.publicnode.com", 137L, mainnetTokens, false,
-                "Mainnet", EvmTokens.POLYGON, "https://polygon.blockscout.com/api/v2", "https://polygonscan.com/tx/", 137),
+                "Mainnet", EvmTokens.POLYGON, "https://polygon.blockscout.com/api/v2", "https://polygonscan.com/tx/", 137, bridgeRoutes = AcrossRoutes.MAINNET),
             evm(Chain.BNB, "https://bsc-rpc.publicnode.com", 56L, mainnetTokens, false,
                 "Mainnet", EvmTokens.BNB, null, "https://bscscan.com/tx/", 56)
         )

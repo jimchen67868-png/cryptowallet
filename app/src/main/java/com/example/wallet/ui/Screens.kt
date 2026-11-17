@@ -85,6 +85,7 @@ fun WalletRoot(vm: WalletViewModel, activity: FragmentActivity) {
                 is Screen.Send -> SendScreen(vm, activity, s.chain, s.token)
                 is Screen.History -> HistoryScreen(vm, s.chain)
                 is Screen.Swap -> SwapScreen(vm, activity, s.chain, s.from)
+                is Screen.Bridge -> BridgeScreen(vm, activity, s.chain, s.from)
                 Screen.NetworkSettings -> NetworkScreen(vm)
                 Screen.MainnetWarning -> MainnetWarningScreen(vm)
             }
@@ -494,6 +495,11 @@ private fun SwapScreen(vm: WalletViewModel, activity: FragmentActivity, chain: C
             enabled = !vm.sending && amount.isNotBlank() && options.isNotEmpty(),
             modifier = Modifier.fillMaxWidth()
         ) { Text("Get quote") }
+        if (provider.supportsBridge) {
+            OutlinedButton(onClick = { vm.goTo(Screen.Bridge(chain, from)) }, modifier = Modifier.fillMaxWidth()) {
+                Text("Move $fromSymbol to another network…")
+            }
+        }
         Text(
             "Routed through ${provider.swapProviderName}. Before anything is signed, the app inspects the transaction " +
                 "itself and rejects the swap if anything is off.",
@@ -523,6 +529,79 @@ private fun SwapScreen(vm: WalletViewModel, activity: FragmentActivity, chain: C
 }
 
 private fun java.math.BigDecimal.plain(): String = stripTrailingZeros().toPlainString()
+
+@Composable
+private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain: Chain, from: TokenBalance?) {
+    val provider = vm.providers.first { it.chain == chain }
+    val symbol = from?.symbol ?: chain.symbol
+    val destinations = provider.bridgeDestinations()
+    var destIndex by remember { mutableStateOf(0) }
+    var amount by remember { mutableStateOf("") }
+    val available = from?.balance ?: vm.accounts.firstOrNull { it.chain == chain }?.balance
+
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Move $symbol to another network", style = MaterialTheme.typography.headlineSmall)
+        Text("From: ${chain.label}" + (available?.let { "  (available ${it.plain()})" } ?: ""))
+        Text("To network:")
+        destinations.forEachIndexed { i, d ->
+            if (i == destIndex) {
+                Button(onClick = { destIndex = i }, modifier = Modifier.fillMaxWidth()) { Text(d.label) }
+            } else {
+                OutlinedButton(onClick = { destIndex = i }, modifier = Modifier.fillMaxWidth()) { Text(d.label) }
+            }
+        }
+        OutlinedTextField(
+            value = amount, onValueChange = { amount = it },
+            label = { Text("Amount ($symbol)") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            modifier = Modifier.fillMaxWidth()
+        )
+        val unitPrice = vm.priceOf(chain, from?.id)
+        val typed = amount.trim().toBigDecimalOrNull()
+        if (unitPrice != null && typed != null && typed.signum() > 0) {
+            Text("≈ ${formatUsd(typed.toDouble() * unitPrice)}", style = MaterialTheme.typography.bodySmall)
+        }
+        if (vm.sending) CircularProgressIndicator()
+        Button(
+            onClick = { destinations.getOrNull(destIndex)?.let { vm.requestBridgeQuote(chain, from, it, amount) } },
+            enabled = !vm.sending && amount.isNotBlank() && destinations.isNotEmpty(),
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Get quote") }
+        Text(
+            "Your funds move between blockchains through Across, a third-party protocol. It takes minutes and cannot be undone. " +
+                "The wallet builds the transaction itself, so only the fee and timing come from Across, and they are checked " +
+                "before anything is signed. Start with a small amount.",
+            style = MaterialTheme.typography.bodySmall
+        )
+        TextButton(onClick = vm::back) { Text("Back") }
+    }
+
+    vm.pendingBridge?.let { q ->
+        AlertDialog(
+            onDismissRequest = vm::cancelBridge,
+            title = { Text("Confirm bridge") },
+            text = {
+                Text(
+                    "Send ${q.amountIn.plain()} $symbol on ${q.chain.label} to ${q.destChain.label}\n\n" +
+                        "You receive about ${q.amountOut.plain()} ${q.outSymbol} on ${q.destChain.label}\n" +
+                        "Bridge fee: ${q.fee.plain()} $symbol (${q.feePercent}%)\n" +
+                        "Estimated time: ${etaText(q.etaSeconds)}\n" +
+                        (if (q.needsApproval) "\nFirst needs a token approval for exactly this amount, so 2 transactions.\n" else "") +
+                        "\nIf the transfer is not filled in time, Across refunds it to you on ${q.chain.label}. This cannot be undone."
+                )
+            },
+            confirmButton = { TextButton(onClick = { vm.confirmBridge(activity) }) { Text("Bridge") } },
+            dismissButton = { TextButton(onClick = vm::cancelBridge) { Text("Cancel") } }
+        )
+    }
+}
+
+private fun etaText(seconds: Long): String = when {
+    seconds <= 0 -> "a few minutes"
+    seconds < 90 -> "about $seconds seconds"
+    else -> "about ${(seconds + 30) / 60} minutes"
+}
 
 @Composable
 private fun HistoryScreen(vm: WalletViewModel, chain: Chain) {

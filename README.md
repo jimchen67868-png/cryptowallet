@@ -75,6 +75,19 @@ Mainnet EVM lists now include DAI, WBTC, UNI, AAVE, BTCB, WBNB, LINK where each 
 BONK, WIF, mSOL and JitoSOL; because a mistyped base58 mint still looks valid, every Solana mint is verified on-chain (exists, is a mint,
 expected decimals) before a quote is requested. Tokens you add yourself can be swap targets but carry a warning.
 
+## Moving funds to another network (Across, EVM mainnets)
+**Swap screen -> "Move X to another network..."** bridges the same asset between Ethereum, Base, Arbitrum and Polygon
+(native ETH on the three ETH chains; USDC, USDT, DAI, WBTC, WETH, LINK where both chains list the token). To change asset as well,
+bridge first, then use **Swap** on the destination network.
+Design: the wallet builds the SpokePool `depositV3` call itself (you are depositor and recipient), so no third-party calldata is signed.
+The Across API only supplies the fee, timestamps and relayer, which `AcrossGuard` checks: the contract must be the allow-listed
+SpokePool for that chain, the fee at most 5% of the amount, deadlines and timestamps within sane bounds.
+Also: exact-amount approval only, a fresh quote at signing (fee may not worsen by more than 2%), simulation before sending, the $100
+mainnet cap, and a fingerprint/PIN prompt. If a relayer never fills the transfer Across refunds it on the origin chain.
+Not verified against the live API from the development environment, and bridges are the riskiest operation in this app:
+use a small amount first. LI.FI-style routes that swap during bridging are deliberately not offered: their calldata cannot be fully verified.
+BNB Chain and Solana are not bridge targets.
+
 ## EVM networks
 Ethereum, Base, Arbitrum, Polygon and BNB Chain, on mainnet and testnet. All share one address (`m/44'/60'/0'/0/0`)
 but balances are per network: **a token sent on the wrong network is not visible on another one.** Each network has its own card,

@@ -94,6 +94,19 @@ interface ChainProvider {
         throw UnsupportedOperationException("Swaps are not supported on ${chain.label}")
     }
 
+    /** True if this network can move funds to another EVM network (mainnets, via Across). */
+    val supportsBridge: Boolean get() = false
+
+    fun bridgeDestinations(): List<Chain> = emptyList()
+
+    suspend fun quoteBridge(userAddress: String, from: SwapAsset, dest: Chain, amount: BigDecimal): BridgeQuote {
+        throw UnsupportedOperationException("Bridging is not supported on ${chain.label}")
+    }
+
+    suspend fun executeBridge(seed: ByteArray, quote: BridgeQuote): SwapResult {
+        throw UnsupportedOperationException("Bridging is not supported on ${chain.label}")
+    }
+
     /** Block explorer page for a transaction id. */
     fun explorerUrl(txId: String): String
 

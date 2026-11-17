@@ -48,7 +48,9 @@ class EthereumProvider(
     /** ParaSwap network id (1, 8453, 42161, 137, 56). Null disables swaps, e.g. on testnets. */
     private val swapNetworkId: Int? = null,
     /** Uniswap v3 deployment, used on testnets where no aggregator has liquidity. Null disables it. */
-    private val uniswap: UniswapV3Config? = null
+    private val uniswap: UniswapV3Config? = null,
+    /** Across bridge routes (mainnets only). The route for this chain's own id must be among them. */
+    private val bridgeRoutes: List<BridgeRoute> = emptyList()
 ) : ChainProvider {
 
     override val chain = evmChain
@@ -295,6 +297,96 @@ class EthereumProvider(
         val res = txManager.sendTransaction(gasPrice, gas, tx.to, tx.data, tx.value)
         if (res.hasError()) throw IllegalStateException(res.error.message)
         SwapResult(approvals, res.transactionHash)
+    }
+
+    // ---- bridging to another network (Across): call data is built here, the API only supplies fee/timing numbers ----
+
+    private val acrossApi: AcrossApi by lazy { AcrossApi() }
+    private val originRoute: BridgeRoute? get() = bridgeRoutes.firstOrNull { it.chain == chain }
+
+    override val supportsBridge: Boolean get() = originRoute != null && bridgeRoutes.size > 1
+
+    override fun bridgeDestinations(): List<Chain> =
+        if (supportsBridge) bridgeRoutes.map { it.chain }.filter { it != chain } else emptyList()
+
+    private class BridgePlan(
+        val route: BridgeRoute, val dest: BridgeRoute,
+        val inputToken: String, val outputToken: String, val decimals: Int, val outSymbol: String
+    )
+
+    private fun bridgePlan(from: SwapAsset, destChain: Chain): BridgePlan {
+        val origin = originRoute ?: throw UnsupportedOperationException("Bridging is not available on ${chain.label}")
+        val dest = bridgeRoutes.firstOrNull { it.chain == destChain && it.chain != chain }
+            ?: throw IllegalArgumentException("${destChain.label} is not a supported destination")
+        if (from.id == null) {
+            check(origin.nativeIsEth) { "${chain.symbol} can't be bridged here. Bridge a token such as USDC instead." }
+            // Native ETH travels as WETH on the SpokePool; the destination receives ETH or WETH.
+            return BridgePlan(origin, dest, origin.weth, dest.weth, 18, if (dest.nativeIsEth) "ETH (or WETH)" else "WETH")
+        }
+        val src = origin.tokens.firstOrNull { it.address.equals(from.id, ignoreCase = true) }
+            ?: throw IllegalArgumentException("${from.symbol} can't be bridged from ${chain.label}")
+        val dst = dest.tokens.firstOrNull { it.symbol == src.symbol }
+            ?: throw IllegalArgumentException("${src.symbol} isn't available on ${dest.chain.label}")
+        check(src.decimals == dst.decimals) { "${src.symbol} has different decimals on ${dest.chain.label}" }
+        return BridgePlan(origin, dest, src.address, dst.address, src.decimals, dst.symbol)
+    }
+
+    private fun nowSeconds() = System.currentTimeMillis() / 1000
+
+    private fun freshFees(plan: BridgePlan, raw: BigInteger, user: String): SuggestedFees {
+        val fees = acrossApi.suggestedFees(plan.route.chainId, plan.dest.chainId, plan.inputToken, plan.outputToken, raw, user)
+        AcrossGuard.validate(fees, plan.route, raw, nowSeconds())?.let { throw IllegalStateException(it) }
+        return fees
+    }
+
+    override suspend fun quoteBridge(
+        userAddress: String, from: SwapAsset, dest: Chain, amount: BigDecimal
+    ): BridgeQuote = withContext(Dispatchers.IO) {
+        val plan = bridgePlan(from, dest)
+        val raw = rawAmount(amount, from.decimals)
+        val fees = freshFees(plan, raw, userAddress)
+        val needsApproval = from.id != null && allowance(from.id, userAddress, plan.route.spokePool) < raw
+        BridgeQuote(
+            chain, dest, from, raw, raw.subtract(fees.totalFee), fees.totalFee,
+            plan.decimals, plan.outSymbol, fees.etaSeconds, needsApproval
+        )
+    }
+
+    override suspend fun executeBridge(seed: ByteArray, quote: BridgeQuote): SwapResult = withContext(Dispatchers.IO) {
+        val plan = bridgePlan(quote.from, quote.destChain)
+        val creds = credentials(seed)
+        val user = creds.address
+        val txManager = RawTransactionManager(web3, creds, chainId)
+        val raw = quote.amountInRaw
+
+        var fees = freshFees(plan, raw, user)
+        val floor = quote.amountOutRaw.multiply(BigInteger.valueOf(98)).divide(BigInteger.valueOf(100))
+        check(raw.subtract(fees.totalFee) >= floor) { "The bridge fee changed. Please request a new quote." }
+
+        // ERC-20 source: approve exactly this amount to the (allow-listed) SpokePool, never unlimited.
+        val approvals = ArrayList<String>()
+        val srcToken = quote.from.id
+        if (srcToken != null) {
+            val current = allowance(srcToken, user, plan.route.spokePool)
+            if (current < raw) {
+                if (current.signum() > 0) approvals.add(sendApproval(txManager, user, srcToken, plan.route.spokePool, BigInteger.ZERO))
+                approvals.add(sendApproval(txManager, user, srcToken, plan.route.spokePool, raw))
+                fees = freshFees(plan, raw, user) // quote timestamps must be recent after waiting for the approval
+                check(raw.subtract(fees.totalFee) >= floor) { "The bridge fee changed. Please request a new quote." }
+            }
+        }
+
+        val data = AcrossAbi.depositV3(
+            depositor = user, recipient = user,
+            inputToken = plan.inputToken, outputToken = plan.outputToken,
+            inputAmount = raw, outputAmount = raw.subtract(fees.totalFee),
+            destinationChainId = plan.dest.chainId, exclusiveRelayer = fees.exclusiveRelayer,
+            quoteTimestamp = fees.timestamp, fillDeadline = fees.fillDeadline,
+            exclusivityDeadline = fees.exclusivityDeadline
+        )
+        val value = if (srcToken == null) raw else BigInteger.ZERO
+        // eth_estimateGas inside sendCall fails closed if the SpokePool would reject this call.
+        SwapResult(approvals, sendCall(txManager, user, plan.route.spokePool, value, data))
     }
 
     // ---- swaps on testnets (Uniswap v3): calldata is built here, nothing third-party is signed ----

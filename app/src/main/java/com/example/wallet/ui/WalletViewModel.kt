@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.wallet.AppContainer
 import com.example.wallet.chain.Chain
 import com.example.wallet.chain.ChainProvider
+import com.example.wallet.chain.BridgeQuote
 import com.example.wallet.chain.SwapAsset
 import com.example.wallet.chain.SwapQuote
 import com.example.wallet.chain.TokenBalance
@@ -56,6 +57,7 @@ sealed interface Screen {
     data class Send(val chain: Chain, val token: TokenBalance? = null) : Screen
     data class History(val chain: Chain) : Screen
     data class Swap(val chain: Chain, val from: TokenBalance? = null) : Screen
+    data class Bridge(val chain: Chain, val from: TokenBalance? = null) : Screen
     object NetworkSettings : Screen
     object MainnetWarning : Screen
 }
@@ -85,6 +87,8 @@ class WalletViewModel(
         private set
     var pendingSwap by mutableStateOf<SwapQuote?>(null)
         private set
+    var pendingBridge by mutableStateOf<BridgeQuote?>(null)
+        private set
     var history by mutableStateOf<HistoryUi>(HistoryUi.Loading)
         private set
     /** CoinGecko coin id -> USD price. */
@@ -102,7 +106,7 @@ class WalletViewModel(
     private var seed: ByteArray? = null
 
     val canGoBack: Boolean
-        get() = screen is Screen.Receive || screen is Screen.Send || screen is Screen.History || screen is Screen.Swap ||
+        get() = screen is Screen.Receive || screen is Screen.Send || screen is Screen.History || screen is Screen.Swap || screen is Screen.Bridge ||
             screen == Screen.NetworkSettings || screen == Screen.MainnetWarning ||
             screen == Screen.ConfirmBackup || screen == Screen.ShowBackup || screen == Screen.Import
 
@@ -111,7 +115,7 @@ class WalletViewModel(
 
     fun back() {
         screen = when (screen) {
-            is Screen.Receive, is Screen.Send, is Screen.History, is Screen.Swap -> Screen.Home
+            is Screen.Receive, is Screen.Send, is Screen.History, is Screen.Swap, is Screen.Bridge -> Screen.Home
             Screen.ConfirmBackup -> Screen.ShowBackup
             Screen.NetworkSettings -> Screen.Home
             Screen.MainnetWarning -> Screen.NetworkSettings
@@ -192,6 +196,7 @@ class WalletViewModel(
         accounts = emptyList()
         pendingSend = null
         pendingSwap = null
+        pendingBridge = null
         tokens = emptyMap()
         history = HistoryUi.Loading
         if (repo.hasWallet()) screen = Screen.Locked
@@ -328,6 +333,52 @@ class WalletViewModel(
                 screen = Screen.Home
                 refreshBalances()
             }.onFailure { message = "Swap failed: ${it.message}" }
+        }
+    }
+
+    // ---- moving funds to another network (Across, EVM mainnets) ----
+    fun requestBridgeQuote(chain: Chain, from: TokenBalance?, dest: Chain, amountText: String) {
+        val provider = providers.first { it.chain == chain }
+        val acc = accounts.firstOrNull { it.chain == chain } ?: return
+        if (!provider.supportsBridge) { message = "Moving funds to another network is not available here."; return }
+        val amount = amountText.trim().toBigDecimalOrNull()
+        if (amount == null || amount.signum() <= 0) { message = "Enter a valid amount"; return }
+        val fromAsset = SwapAsset(from?.id, from?.symbol ?: chain.symbol, from?.decimals ?: provider.nativeDecimals)
+        val balance = from?.balance ?: acc.balance
+        if (balance != null && amount > balance) { message = "Amount exceeds your ${fromAsset.symbol} balance"; return }
+        limitError(chain, from?.id, amount)?.let { message = it; return }
+        sending = true
+        viewModelScope.launch {
+            runCatching { provider.quoteBridge(acc.address, fromAsset, dest, amount) }
+                .onSuccess { pendingBridge = it }
+                .onFailure { message = it.message ?: "Could not get a bridge quote" }
+            sending = false
+        }
+    }
+
+    fun cancelBridge() { pendingBridge = null }
+
+    fun confirmBridge(activity: FragmentActivity) {
+        val q = pendingBridge ?: return
+        pendingBridge = null
+        val provider = providers.first { it.chain == q.chain }
+        val s = seed?.copyOf() ?: return
+        viewModelScope.launch {
+            if (!repo.confirmIdentity(activity, "Confirm bridge")) {
+                message = "Authentication cancelled. Nothing was sent."
+                s.fill(0)
+                return@launch
+            }
+            limitError(q.chain, q.from.id, q.amountIn)?.let { message = it; s.fill(0); return@launch }
+            sending = true
+            val r = runCatching { provider.executeBridge(s, q) }
+            s.fill(0)
+            sending = false
+            r.onSuccess {
+                message = "Bridge submitted. Tx: ${it.swapTxId}. Funds arrive on ${q.destChain.label} in a few minutes: open that card and tap Refresh."
+                screen = Screen.Home
+                refreshBalances()
+            }.onFailure { message = "Bridge failed: ${it.message}" }
         }
     }
 
