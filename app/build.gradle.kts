@@ -3,6 +3,12 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// The Across proxy (see proxy/README.md). Set as GitHub Actions variable/secret or as -P gradle properties; both default
+// to empty, which leaves the bridge switched off. The Across API key itself is NEVER in the app: only the proxy URL and a
+// revocable token that lets the app reach the proxy.
+fun envOrProperty(name: String): String = (providers.gradleProperty(name).orNull ?: System.getenv(name) ?: "").trim()
+fun quoted(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
 android {
     namespace = "com.example.wallet"
     compileSdk = 34
@@ -13,6 +19,8 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+        buildConfigField("String", "ACROSS_PROXY_URL", quoted(envOrProperty("ACROSS_PROXY_URL")))
+        buildConfigField("String", "ACROSS_PROXY_TOKEN", quoted(envOrProperty("ACROSS_PROXY_TOKEN")))
     }
 
     buildTypes {
@@ -31,7 +39,10 @@ android {
 
     testOptions { unitTests { isReturnDefaultValues = true } }
 
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
 
     packaging {

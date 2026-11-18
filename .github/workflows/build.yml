@@ -34,6 +34,10 @@ jobs:
 
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
+        env:
+          # Optional. Repository variable and secret; see proxy/README.md. Empty = bridge switched off.
+          ACROSS_PROXY_URL: ${{ vars.ACROSS_PROXY_URL }}
+          ACROSS_PROXY_TOKEN: ${{ secrets.ACROSS_PROXY_TOKEN }}
 
       - uses: actions/upload-artifact@v4
         with:

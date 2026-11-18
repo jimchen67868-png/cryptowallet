@@ -1,0 +1,6 @@
+# Only needed if you deploy with the wrangler CLI. Pasting worker.js into the Cloudflare dashboard works too.
+name = "wallet-across-proxy"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Set the two secrets with: wrangler secret put ACROSS_API_KEY   and   wrangler secret put APP_TOKEN

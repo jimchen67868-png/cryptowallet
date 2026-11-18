@@ -94,6 +94,16 @@ Not verified against the live API from the development environment, and bridges 
 use a small amount first. LI.FI-style routes that swap during bridging are deliberately not offered: their calldata cannot be fully verified.
 BNB Chain and Solana are not bridge targets.
 
+### Bridge status: migrating to the Across v1 API (in progress)
+Across deprecated the API the bridge code was written against (`suggested-fees`, `deposit/status`, direct `depositV3`) and now
+requires an API key, which must stay server-side, and has no testnet. Migration is under way:
+- **Done:** `proxy/` (a Cloudflare Worker that holds the key and forwards only `GET /v1/capabilities`, `POST /v1/quotes`,
+  `GET /v1/transfers/{orderId}`; see `proxy/README.md`) and `AcrossProxy.kt` (the app's keyless client, https-only, parses both of
+  Across's error shapes). With no proxy configured the new client refuses to run.
+- **Not done:** switching the bridge screens and the bridge-then-swap watcher over to it. That needs a guard that decodes the
+  deposit transaction Across returns (target contract, function, recipient, amounts) before anything is signed, and I have not
+  yet seen a real response to build it against. Until then the old bridge code is unchanged and probably no longer works.
+
 ### Bridge, then swap on arrival
 On the bridge screen, pick **"Swap to X"** under the destination to move funds *and* change asset. It is two separately
 authorised steps, because Across fills on the destination chain after the deposit and a swap cannot be part of that transaction:
