@@ -50,7 +50,9 @@ class EthereumProvider(
     /** Uniswap v3 deployment, used on testnets where no aggregator has liquidity. Null disables it. */
     private val uniswap: UniswapV3Config? = null,
     /** Across bridge routes (mainnets only). The route for this chain's own id must be among them. */
-    private val bridgeRoutes: List<BridgeRoute> = emptyList()
+    private val bridgeRoutes: List<BridgeRoute> = emptyList(),
+    /** Uniswap v2 router, tried alongside [uniswap] on testnets. Only used when [uniswap] is set too. */
+    private val uniswapV2: UniswapV2Config? = null
 ) : ChainProvider {
 
     override val chain = evmChain
@@ -211,7 +213,12 @@ class EthereumProvider(
     // ---- swaps (ParaSwap) ----
 
     override val supportsSwap: Boolean get() = swapNetworkId != null || uniswap != null
-    override val swapProviderName: String get() = if (swapNetworkId != null) "ParaSwap" else "Uniswap v3"
+    override val swapProviderName: String
+        get() = when {
+            swapNetworkId != null -> "ParaSwap"
+            uniswapV2 != null -> "Uniswap v3 and v2"
+            else -> "Uniswap v3"
+        }
 
     private val paraSwap: ParaSwapApi? by lazy { swapNetworkId?.let { ParaSwapApi(it) } }
 
@@ -411,9 +418,27 @@ class EthereumProvider(
         if (isWrap(cfg, from, to) || isUnwrap(cfg, from, to)) {
             return@withContext SwapQuote(chain, from, to, raw, raw, 0, false, null)
         }
-        val best = bestUniswapQuote(cfg, from, to, raw)
-        val needsApproval = from.id != null && allowance(from.id, userAddress, cfg.router) < raw
-        SwapQuote(chain, from, to, raw, best.second, UNISWAP_SLIPPAGE_BPS, needsApproval, null)
+        val v3 = runCatching { bestUniswapQuote(cfg, from, to, raw) }
+        val v2cfg = uniswapV2
+        if (v2cfg == null) {
+            // No v2 configured: behave exactly as v3-only (a missing pool surfaces v3's own error message).
+            val best = v3.getOrThrow()
+            val needsApproval = from.id != null && allowance(from.id, userAddress, cfg.router) < raw
+            return@withContext SwapQuote(chain, from, to, raw, best.second, UNISWAP_SLIPPAGE_BPS, needsApproval, null, VENUE_V3)
+        }
+        val v2 = runCatching { bestV2Quote(v2cfg, from, to, raw) }
+        val v3out = v3.getOrNull()?.second
+        val v2out = v2.getOrNull()?.second
+        val useV2 = UniswapVenue.preferV2(v3out, v2out) ?: throw IllegalStateException(
+            "No Uniswap v3 or v2 pool with liquidity for this pair on $networkName. " +
+                "Pick another pair, or create a pool at app.uniswap.org."
+        )
+        val router = if (useV2) v2cfg.router else cfg.router
+        val needsApproval = from.id != null && allowance(from.id, userAddress, router) < raw
+        SwapQuote(
+            chain, from, to, raw, (if (useV2) v2out else v3out)!!, UNISWAP_SLIPPAGE_BPS, needsApproval, null,
+            if (useV2) VENUE_V2 else VENUE_V3
+        )
     }
 
     private suspend fun executeUniswap(seed: ByteArray, quote: SwapQuote): SwapResult = withContext(Dispatchers.IO) {
@@ -432,6 +457,10 @@ class EthereumProvider(
             return@withContext SwapResult(
                 emptyList(), sendCall(txManager, user, cfg.weth, BigInteger.ZERO, UniswapV3Abi.wethWithdraw(amount))
             )
+        }
+
+        if (quote.venue == VENUE_V2) {
+            return@withContext executeUniswapV2(txManager, user, quote)
         }
 
         // Fresh on-chain quote; refuse if the price moved against the user since they confirmed.
@@ -466,6 +495,67 @@ class EthereumProvider(
         }
         val value = if (srcToken == null) amount else BigInteger.ZERO
         SwapResult(approvals, sendCall(txManager, user, cfg.router, value, data))
+    }
+
+    /** The router's own WETH (v2 and v3 deployments on a testnet do not share one). Re-read if a lookup failed. */
+    private val v2Weth: String by lazy {
+        val router = uniswapV2?.router ?: throw UnsupportedOperationException("Uniswap v2 is not available on ${chain.label} $networkName")
+        val res = web3.ethCall(
+            Transaction.createEthCallTransaction(ZERO_ADDRESS, router, UniswapV2Abi.wethCall()), DefaultBlockParameterName.LATEST
+        ).send()
+        check(!res.hasError()) { "Could not read WETH from the Uniswap v2 router" }
+        UniswapV2Abi.addressFromWord(res.value) ?: throw IllegalStateException("The Uniswap v2 router returned an invalid WETH address")
+    }
+
+    /** Best output over the direct pair and a hop through WETH. Returns (path, amountOut). */
+    private fun bestV2Quote(v2: UniswapV2Config, from: SwapAsset, to: SwapAsset, raw: BigInteger): Pair<List<String>, BigInteger> {
+        val weth = v2Weth
+        val tokenIn = from.id ?: weth
+        val tokenOut = to.id ?: weth
+        check(!tokenIn.equals(tokenOut, ignoreCase = true)) { "Choose two different assets" }
+        var best: Pair<List<String>, BigInteger>? = null
+        for (path in UniswapV2Abi.candidatePaths(tokenIn, tokenOut, weth)) {
+            val out = runCatching {
+                val tx = Transaction.createEthCallTransaction(ZERO_ADDRESS, v2.router, UniswapV2Abi.getAmountsOut(raw, path))
+                val res = web3.ethCall(tx, DefaultBlockParameterName.LATEST).send()
+                if (res.hasError()) null else UniswapV2Abi.lastAmount(res.value, path.size)
+            }.getOrNull() ?: continue // a missing pair reverts
+            if (out.signum() > 0 && (best == null || out > best.second)) best = path to out
+        }
+        return best ?: throw IllegalStateException("No Uniswap v2 pool with liquidity for this pair on $networkName")
+    }
+
+    private fun executeUniswapV2(txManager: RawTransactionManager, user: String, quote: SwapQuote): SwapResult {
+        val v2 = uniswapV2 ?: throw UnsupportedOperationException("Uniswap v2 is not available on ${chain.label} $networkName")
+        val from = quote.from
+        val to = quote.to
+        val amount = quote.amountInRaw
+
+        // Fresh on-chain quote; refuse if the price moved against the user since they confirmed.
+        val (path, out) = bestV2Quote(v2, from, to, amount)
+        val floor = quote.expectedOutRaw.multiply(BigInteger.valueOf(99)).divide(BigInteger.valueOf(100))
+        check(out >= floor) { "The price moved by more than 1%. Please request a new quote." }
+
+        // ERC-20 source: approve exactly this amount to the v2 router (never unlimited).
+        val approvals = ArrayList<String>()
+        val srcToken = from.id
+        if (srcToken != null) {
+            val current = allowance(srcToken, user, v2.router)
+            if (current < amount) {
+                if (current.signum() > 0) approvals.add(sendApproval(txManager, user, srcToken, v2.router, BigInteger.ZERO))
+                approvals.add(sendApproval(txManager, user, srcToken, v2.router, amount))
+            }
+        }
+
+        val minOut = SwapGuard.minOut(out, quote.slippageBps)
+        val deadline = nowSeconds() + UniswapV2Abi.DEADLINE_SECONDS
+        val data = when {
+            srcToken == null -> UniswapV2Abi.swapExactEthForTokens(minOut, path, user, deadline)
+            to.id == null -> UniswapV2Abi.swapExactTokensForEth(amount, minOut, path, user, deadline)
+            else -> UniswapV2Abi.swapExactTokensForTokens(amount, minOut, path, user, deadline)
+        }
+        val value = if (srcToken == null) amount else BigInteger.ZERO
+        return SwapResult(approvals, sendCall(txManager, user, v2.router, value, data))
     }
 
     /** Best output over the fee tiers that have a pool with liquidity. Returns (fee tier, amountOut). */
@@ -636,6 +726,8 @@ class EthereumProvider(
     companion object {
         private const val SWAP_SLIPPAGE_BPS = 50 // 0.5%
         private const val UNISWAP_SLIPPAGE_BPS = 100 // 1%: testnet pools are thin
+        private const val VENUE_V3 = "Uniswap v3"
+        private const val VENUE_V2 = "Uniswap v2"
         private const val ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
         private val DECIMALS_FN = Function(

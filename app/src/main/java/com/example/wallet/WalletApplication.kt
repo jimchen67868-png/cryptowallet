@@ -10,6 +10,7 @@ import com.example.wallet.chain.ChainProvider
 import com.example.wallet.chain.EthereumProvider
 import com.example.wallet.chain.SolanaProvider
 import com.example.wallet.chain.UniswapDeployments
+import com.example.wallet.chain.UniswapV2Deployments
 import com.example.wallet.chain.UniswapV3Config
 import com.example.wallet.data.AppSettings
 import com.example.wallet.data.PrefsBridgeSwapStore
@@ -66,7 +67,7 @@ class AppContainer(context: Context) {
 
     private val testnetProviders: List<ChainProvider> by lazy {
         listOf(
-            EthereumProvider(testnetTokens, uniswap = UniswapDeployments.SEPOLIA), BitcoinProvider(), SolanaProvider(),
+            EthereumProvider(testnetTokens, uniswap = UniswapDeployments.SEPOLIA, uniswapV2 = UniswapV2Deployments.SEPOLIA), BitcoinProvider(), SolanaProvider(),
             evm(Chain.BASE, "https://base-sepolia-rpc.publicnode.com", 84532L, testnetTokens, true,
                 "Sepolia testnet", emptyList(), "https://base-sepolia.blockscout.com/api/v2", "https://sepolia.basescan.org/tx/", uniswap = UniswapDeployments.BASE_SEPOLIA),
             evm(Chain.ARB, "https://arbitrum-sepolia-rpc.publicnode.com", 421614L, testnetTokens, true,

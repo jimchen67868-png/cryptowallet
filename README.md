@@ -66,7 +66,13 @@ Uniswap v3 contracts (QuoterV2 for the price, SwapRouter02 to trade). The wallet
 transaction to trust. It picks the best of the four fee tiers, approves the exact amount, and sets the minimum output from a fresh
 on-chain quote (1% slippage).
 - **ETH <-> WETH** is a plain wrap/unwrap on the WETH contract (always works, handy for testing the flow).
-- Any other pair works only if somebody created a pool for it: otherwise you get "No Uniswap v3 pool with liquidity". Tokens you add
+- **Uniswap v2 fallback (Sepolia only).** On Sepolia the wallet also asks the official Uniswap v2 router (UniswapV2Router02) for a price,
+  trying the direct pair and a hop through WETH, and uses whichever of v3 or v2 gives the higher output (a tie goes to v3). The swap
+  confirmation shows "Route: Uniswap v2/v3". Calldata is built by the wallet and checked against an independent encoder
+  (`tools/verify/uniswap_v2_golden.py`); the router's WETH is read from the router itself, since v2 and v3 use different WETH
+  contracts on Sepolia. Uniswap publishes no official v2 for Base Sepolia or Arbitrum Sepolia, so those stay v3-only.
+  UniswapX is not supported on any testnet, and v4 is not implemented.
+- Any other pair works only if somebody created a pool for it: otherwise you get "No Uniswap v3 or v2 pool with liquidity". Tokens you add
   with *Add token* appear in the swap list marked "(custom)". Create a pool at app.uniswap.org on the same testnet if you need one.
 - Solana devnet has no swap support (no deployed aggregator liquidity). Bitcoin has no swaps.
 

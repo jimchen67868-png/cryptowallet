@@ -522,6 +522,7 @@ private fun SwapScreen(vm: WalletViewModel, activity: FragmentActivity, chain: C
                 Text(
                     "Swap ${q.amountIn.plain()} ${q.from.symbol} for about ${q.expectedOut.plain()} ${q.to.symbol}\n\n" +
                         "Minimum you receive: ${q.minOut.plain()} ${q.to.symbol} (${q.slippageBps / 100.0}% slippage)\n" +
+                        (q.venue?.let { "Route: $it\n" } ?: "") +
                         (if (q.to.curated) "" else "\nWarning: ${q.to.symbol} is a token you added yourself, not on the built-in list. Check its contract address first.\n") +
                         (if (q.needsApproval) "\nFirst needs a token approval for exactly this amount, so 2 transactions.\n" else "") +
                         (q.gasUsd?.let { "\nEstimated network fee: about $" + it + "\n" } ?: "") +

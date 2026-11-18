@@ -21,7 +21,9 @@ class SwapQuote(
     val expectedOutRaw: BigInteger,
     val slippageBps: Int,
     val needsApproval: Boolean,
-    val gasUsd: String?
+    val gasUsd: String?,
+    /** Which on-chain venue was chosen when more than one is available (e.g. "Uniswap v2"); null = the provider's default. */
+    val venue: String? = null
 ) {
     val amountIn: BigDecimal get() = BigDecimal(amountInRaw).movePointLeft(from.decimals)
     val expectedOut: BigDecimal get() = BigDecimal(expectedOutRaw).movePointLeft(to.decimals)
