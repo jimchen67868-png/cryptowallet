@@ -109,6 +109,13 @@ too). The facet layout is pinned by its function selector; a different LI.FI fac
 Unauthenticated LI.FI limit: 75 quotes per 2 hours per IP. Not run against live networks from the development environment, and
 bridges are the riskiest operation in this app: use a small amount first. BNB Chain and Solana are not bridge targets.
 
+### Relay testnet bridge (planned)
+Relay's testnet API (`api.testnets.relay.link`) supports only Sepolia and Base Sepolia, and only native ETH can be bridged there.
+A caveat to keep in mind: in Relay's flow the on-chain deposit carries a request id, and the destination is bound by Relay's server,
+not by the transaction, so unlike the LI.FI route the wallet cannot prove the recipient from calldata. That is acceptable for test
+funds and is the reason this route is for testnets only. `proxy/relay-worker.js` and `tools/capture_relay.sh` exist; the app route
+is waiting on a captured quote.
+
 ### Bridge, then swap on arrival
 On the bridge screen, pick **"Swap to X"** under the destination to move funds *and* change asset. It is two separately
 authorised steps, because Across fills on the destination chain after the deposit and a swap cannot be part of that transaction:
