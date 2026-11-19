@@ -372,8 +372,6 @@ class WalletViewModel(
 
     // ---- moving funds to another network (Across, EVM mainnets), optionally swapping on arrival ----
 
-    private val isTestnet: Boolean get() = network == Network.TESTNET
-
     /** The provider for [chain] on the network the app is on now (bridge jobs are only handled on their own network). */
     private fun netProvider(chain: Chain): ChainProvider = providers.first { it.chain == chain }
 
