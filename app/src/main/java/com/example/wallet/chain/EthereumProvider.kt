@@ -52,7 +52,9 @@ class EthereumProvider(
     /** Across bridge routes (mainnets only). The route for this chain's own id must be among them. */
     private val bridgeRoutes: List<BridgeRoute> = emptyList(),
     /** Uniswap v2 router, tried alongside [uniswap] on testnets. Only used when [uniswap] is set too. */
-    private val uniswapV2: UniswapV2Config? = null
+    private val uniswapV2: UniswapV2Config? = null,
+    /** Bridge TEST ETH to the other Relay testnet (Sepolia <-> Base Sepolia). Never set on mainnet. */
+    private val relayTestnet: Boolean = false
 ) : ChainProvider {
 
     override val chain = evmChain
@@ -311,10 +313,25 @@ class EthereumProvider(
     private val lifi: LiFiApi by lazy { LiFiApi() }
     private val originRoute: BridgeRoute? get() = bridgeRoutes.firstOrNull { it.chain == chain }
 
-    override val supportsBridge: Boolean get() = originRoute != null && bridgeRoutes.size > 1
+    override val supportsBridge: Boolean
+        get() = if (relayTestnet) RelayTestnet.chainIdOf(chain) != null else originRoute != null && bridgeRoutes.size > 1
 
-    override fun bridgeDestinations(): List<Chain> =
-        if (supportsBridge) bridgeRoutes.map { it.chain }.filter { it != chain } else emptyList()
+    override fun bridgeDestinations(): List<Chain> = when {
+        relayTestnet -> RelayTestnet.destinations(chain)
+        supportsBridge -> bridgeRoutes.map { it.chain }.filter { it != chain }
+        else -> emptyList()
+    }
+
+    private val relay: RelayApi by lazy { RelayApi() }
+
+    /** A fresh Relay testnet quote for exactly what the user asked for, checked by [RelayGuard]. */
+    private fun freshRelayQuote(user: String, dest: Chain, raw: BigInteger): RelayQuote {
+        val destId = RelayTestnet.chainIdOf(dest) ?: throw IllegalArgumentException("${dest.label} is not a supported destination")
+        val req = RelayRequest(user, chainId, destId, raw)
+        val quote = relay.quote(req)
+        RelayGuard.validate(quote, req)?.let { throw IllegalStateException(it) }
+        return quote
+    }
 
     private class BridgePlan(
         val route: BridgeRoute, val dest: BridgeRoute,
@@ -352,6 +369,15 @@ class EthereumProvider(
     override suspend fun quoteBridge(
         userAddress: String, from: SwapAsset, dest: Chain, amount: BigDecimal
     ): BridgeQuote = withContext(Dispatchers.IO) {
+        if (relayTestnet) {
+            if (from.id != null) throw IllegalStateException(RelayGuard.TOKENS_UNSUPPORTED)
+            val rawEth = rawAmount(amount, from.decimals)
+            val rq = freshRelayQuote(userAddress, dest, rawEth)
+            return@withContext BridgeQuote(
+                chain, dest, from, rawEth, rq.amountOut, rawEth.subtract(rq.amountOut),
+                18, dest.symbol, rq.etaSeconds, false
+            )
+        }
         val plan = bridgePlan(from, dest)
         val raw = rawAmount(amount, from.decimals)
         val q = freshQuote(plan, from, raw, userAddress)
@@ -364,6 +390,18 @@ class EthereumProvider(
     }
 
     override suspend fun executeBridge(seed: ByteArray, quote: BridgeQuote): SwapResult = withContext(Dispatchers.IO) {
+        if (relayTestnet) {
+            if (quote.from.id != null) throw IllegalStateException(RelayGuard.TOKENS_UNSUPPORTED)
+            val rcreds = credentials(seed)
+            val ruser = rcreds.address
+            val rtx = RawTransactionManager(web3, rcreds, chainId)
+            val rq = freshRelayQuote(ruser, quote.destChain, quote.amountInRaw)
+            val rfloor = quote.amountOutRaw.multiply(BigInteger.valueOf(95)).divide(BigInteger.valueOf(100))
+            check(rq.amountOut >= rfloor) { "Relay's fee changed. Please request a new quote." }
+            // eth_estimateGas inside sendCall fails closed if the depository would reject this call.
+            val hash = sendCall(rtx, ruser, rq.txTo, rq.txValue, rq.txData)
+            return@withContext SwapResult(emptyList(), hash, rq.requestId)
+        }
         val plan = bridgePlan(quote.from, quote.destChain)
         val creds = credentials(seed)
         val user = creds.address
@@ -391,7 +429,9 @@ class EthereumProvider(
     }
 
     override suspend fun bridgeFillStatus(depositTxId: String): FillStatus = withContext(Dispatchers.IO) {
-        try { lifi.status(depositTxId, chainId.toLong()) } catch (e: Exception) { FillStatus.UNKNOWN }
+        try {
+            if (relayTestnet) relay.status(depositTxId) else lifi.status(depositTxId, chainId.toLong())
+        } catch (e: Exception) { FillStatus.UNKNOWN }
     }
 
     // ---- swaps on testnets (Uniswap v3): calldata is built here, nothing third-party is signed ----

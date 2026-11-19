@@ -47,7 +47,11 @@ data class BridgeSwapJob(
     val previewOutRaw: BigInteger?,
     val stage: JobStage = JobStage.WAITING_FILL,
     val arrivedAsset: SwapAsset? = null,
-    val swapTxId: String? = null
+    val swapTxId: String? = null,
+    /** A job made on the test networks: only shown and watched while the app is on testnet. */
+    val testnet: Boolean = false,
+    /** What to follow the bridge by when it is not the deposit hash (Relay's requestId). */
+    val trackingId: String? = null
 )
 
 object BridgeSwapLogic {
@@ -68,7 +72,10 @@ object BridgeSwapLogic {
      * Native coin kept back when the swap input is the chain's native coin, so the swap itself can be paid for.
      * A heuristic, not an estimate: the swap fails closed (node or simulation rejects it) if it is too low.
      */
-    fun gasReserveRaw(chain: Chain): BigInteger = when (chain) {
+    fun gasReserveRaw(chain: Chain, testnet: Boolean = false): BigInteger = if (testnet) {
+        // Test networks: Sepolia gas is far less predictable than its price, so this is generous there and tiny elsewhere.
+        if (chain == Chain.ETH) BigInteger("200000000000000") else BigInteger("5000000000000")
+    } else when (chain) {
         Chain.ETH -> BigInteger("6000000000000000")       // 0.006 ETH
         Chain.BASE, Chain.ARB -> BigInteger("200000000000000") // 0.0002 ETH
         Chain.POL -> BigInteger("50000000000000000")      // 0.05 POL
@@ -199,6 +206,8 @@ object BridgeSwapJobCodec {
         .put("stage", j.stage.name)
         .put("arrived", j.arrivedAsset?.let { assetJson(it) } ?: JSONObject.NULL)
         .put("swapTx", j.swapTxId ?: JSONObject.NULL)
+        .put("testnet", j.testnet)
+        .put("trackingId", j.trackingId ?: JSONObject.NULL)
 
     /** Null for anything malformed: a corrupt record is dropped rather than half-trusted. */
     fun fromJson(o: JSONObject): BridgeSwapJob? = try {
@@ -219,7 +228,9 @@ object BridgeSwapJobCodec {
             previewOutRaw = if (o.isNull("previewOut")) null else BigInteger(o.getString("previewOut")),
             stage = JobStage.valueOf(o.getString("stage")),
             arrivedAsset = if (o.isNull("arrived")) null else asset(o.getJSONObject("arrived")),
-            swapTxId = if (o.isNull("swapTx")) null else o.getString("swapTx")
+            swapTxId = if (o.isNull("swapTx")) null else o.getString("swapTx"),
+            testnet = o.optBoolean("testnet", false),
+            trackingId = if (o.isNull("trackingId")) null else o.optString("trackingId").ifBlank { null }
         )
     } catch (e: Exception) {
         null

@@ -16,6 +16,7 @@ import com.example.wallet.chain.BridgeSwapLogic
 import com.example.wallet.chain.BridgeSwapStore
 import com.example.wallet.chain.Chain
 import com.example.wallet.chain.JobStage
+import com.example.wallet.chain.RelayTestnet
 import com.example.wallet.chain.ChainProvider
 import com.example.wallet.chain.BridgeQuote
 import com.example.wallet.chain.SwapAsset
@@ -371,7 +372,17 @@ class WalletViewModel(
 
     // ---- moving funds to another network (Across, EVM mainnets), optionally swapping on arrival ----
 
-    private fun mainnet(chain: Chain): ChainProvider = providersFor(Network.MAINNET).first { it.chain == chain }
+    private val isTestnet: Boolean get() = network == Network.TESTNET
+
+    /** The provider for [chain] on the network the app is on now (bridge jobs are only handled on their own network). */
+    private fun netProvider(chain: Chain): ChainProvider = providers.first { it.chain == chain }
+
+    /** Assets the bridged funds can arrive as: ETH on the Relay test networks, LI.FI/Across routes on mainnet. */
+    private fun bridgeCandidates(from: SwapAsset, chain: Chain, dest: Chain): List<SwapAsset> =
+        if (isTestnet) RelayTestnet.candidateAssets(from, dest)
+        else BridgeSwapLogic.candidateAssets(from, routeOf(chain), routeOf(dest))
+
+    private fun visibleJobs(): List<BridgeSwapJob> = coordinator.jobs().filter { it.testnet == isTestnet }
 
     private fun routeOf(chain: Chain) = AcrossRoutes.MAINNET.first { it.chain == chain }
 
@@ -380,7 +391,7 @@ class WalletViewModel(
     /** Balances of [assets] on [chain], in raw units. An entry is null if it could not be read. */
     private suspend fun destBalances(chain: Chain, assets: List<SwapAsset>): List<BigInteger?> {
         val address = accounts.firstOrNull { it.chain == chain }?.address ?: return assets.map { null }
-        val p = mainnet(chain)
+        val p = netProvider(chain)
         val native = runCatching { p.getBalance(address) }.getOrNull()
         val tokenList = runCatching { p.getTokenBalances(address) }.getOrNull()
         return assets.map { a ->
@@ -393,7 +404,7 @@ class WalletViewModel(
 
     private val coordinator = BridgeSwapCoordinator(
         store = bridgeStore,
-        fillStatus = { job -> mainnet(job.originChain).bridgeFillStatus(job.depositTxId) },
+        fillStatus = { job -> netProvider(job.originChain).bridgeFillStatus(job.trackingId ?: job.depositTxId) },
         balances = { job -> destBalances(job.destChain, job.candidates.map { it.asset }) }
     )
 
@@ -407,8 +418,9 @@ class WalletViewModel(
     /** Reloads saved jobs and resumes watching the ones still waiting. Mainnet only, and only while unlocked. */
     private fun resumeBridgeJobs() {
         stopWatching()
-        if (network != Network.MAINNET || seed == null) { bridgeJobs = emptyList(); return }
-        bridgeJobs = coordinator.recoverInterrupted()
+        if (seed == null) { bridgeJobs = emptyList(); return }
+        coordinator.recoverInterrupted()
+        bridgeJobs = visibleJobs()
         bridgeJobs.filter { it.stage == JobStage.WAITING_FILL }.forEach { startWatching(it.id) }
     }
 
@@ -416,11 +428,11 @@ class WalletViewModel(
         if (watchers[jobId]?.isActive == true) return
         watchers[jobId] = viewModelScope.launch {
             while (true) {
-                if (network != Network.MAINNET || seed == null) return@launch
+                if (seed == null) return@launch
                 val job = bridgeJobs.firstOrNull { it.id == jobId } ?: return@launch
-                if (job.stage != JobStage.WAITING_FILL) return@launch
+                if (job.testnet != isTestnet || job.stage != JobStage.WAITING_FILL) return@launch
                 val updated = coordinator.poll(job)
-                bridgeJobs = coordinator.jobs()
+                bridgeJobs = visibleJobs()
                 when (updated.stage) {
                     JobStage.ARRIVED -> { message = "Funds arrived on ${updated.destChain.label}. Review the swap on the home screen."; return@launch }
                     JobStage.BRIDGE_FAILED -> { message = "A bridge did not complete. See the home screen."; return@launch }
@@ -435,12 +447,11 @@ class WalletViewModel(
 
     /** Curated assets on [dest] that the bridged funds can be swapped into (never the bridged asset itself). */
     fun swapTargetsAfterBridge(chain: Chain, from: TokenBalance?, dest: Chain): List<SwapAsset> {
-        if (network != Network.MAINNET) return emptyList()
         val fromAsset = SwapAsset(from?.id, from?.symbol ?: chain.symbol, from?.decimals ?: 18)
-        val cands = BridgeSwapLogic.candidateAssets(fromAsset, routeOf(chain), routeOf(dest))
+        val cands = bridgeCandidates(fromAsset, chain, dest)
         if (cands.isEmpty()) return emptyList()
         val keys = cands.map { SwapGuard.tokenKey(it) }.toSet()
-        return mainnet(dest).swapAssets().filter { it.curated && SwapGuard.tokenKey(it) !in keys }
+        return netProvider(dest).swapAssets().filter { it.curated && SwapGuard.tokenKey(it) !in keys }
     }
 
     fun requestBridgeQuote(
@@ -473,19 +484,17 @@ class WalletViewModel(
      * Throws with a user-facing message if not.
      */
     private suspend fun buildCombo(q: BridgeQuote, to: SwapAsset, user: String): ComboPlan {
-        val origin = routeOf(q.chain)
-        val destRoute = routeOf(q.destChain)
-        val cands = BridgeSwapLogic.candidateAssets(q.from, origin, destRoute)
+        val cands = bridgeCandidates(q.from, q.chain, q.destChain)
         require(cands.isNotEmpty()) { "Can't plan a swap for ${q.from.symbol} on ${q.destChain.label}. Bridge it first, then swap." }
         val toKey = SwapGuard.tokenKey(to)
         require(cands.none { SwapGuard.tokenKey(it) == toKey }) { "Choose a different asset to swap into." }
         require(to.curated) { "Only built-in tokens can be used for swap on arrival." }
 
-        val dest = mainnet(q.destChain)
+        val dest = netProvider(q.destChain)
         // The swap on arrival needs native coin for fees. Native ETH bridged to an ETH-gas chain brings its own.
-        val bringsOwnGas = q.from.id == null && destRoute.nativeIsEth
+        val bringsOwnGas = q.from.id == null && (isTestnet || routeOf(q.destChain).nativeIsEth)
         if (!bringsOwnGas) {
-            val reserve = BigDecimal(BridgeSwapLogic.gasReserveRaw(q.destChain)).movePointLeft(dest.nativeDecimals)
+            val reserve = BigDecimal(BridgeSwapLogic.gasReserveRaw(q.destChain, isTestnet)).movePointLeft(dest.nativeDecimals)
             val have = dest.getBalance(user)
             require(have >= reserve) {
                 "You have no ${q.destChain.symbol} on ${q.destChain.label} to pay for the swap there. " +
@@ -493,7 +502,7 @@ class WalletViewModel(
             }
         }
         val previewAsset = cands.first()
-        val reserveRaw = if (previewAsset.id == null) BridgeSwapLogic.gasReserveRaw(q.destChain) else BigInteger.ZERO
+        val reserveRaw = if (previewAsset.id == null) BridgeSwapLogic.gasReserveRaw(q.destChain, isTestnet) else BigInteger.ZERO
         val previewRaw = q.amountOutRaw.subtract(reserveRaw)
         require(previewRaw.signum() > 0) { "This amount is too small to cover the swap on ${q.destChain.label}." }
         val preview = dest.quoteSwap(user, previewAsset, to, BigDecimal(previewRaw).movePointLeft(previewAsset.decimals))
@@ -519,7 +528,7 @@ class WalletViewModel(
 
             // Snapshot the destination balances BEFORE sending: arrival is detected as a rise above this baseline.
             val baseline: List<ArrivalCandidate>? = if (combo == null) null else {
-                val cands = BridgeSwapLogic.candidateAssets(q.from, routeOf(q.chain), routeOf(q.destChain))
+                val cands = bridgeCandidates(q.from, q.chain, q.destChain)
                 val raw = destBalances(q.destChain, cands)
                 if (cands.isEmpty() || raw.any { it == null }) {
                     message = "Could not read your balance on ${q.destChain.label}. Nothing was sent."
@@ -544,10 +553,12 @@ class WalletViewModel(
                         candidates = baseline,
                         target = combo.to,
                         previewInRaw = combo.preview.amountInRaw,
-                        previewOutRaw = combo.preview.expectedOutRaw
+                        previewOutRaw = combo.preview.expectedOutRaw,
+                        testnet = isTestnet,
+                        trackingId = it.trackingId
                     )
                     coordinator.start(job)
-                    bridgeJobs = coordinator.jobs()
+                    bridgeJobs = visibleJobs()
                     startWatching(job.id)
                     message = "Bridge submitted. Tx: ${it.swapTxId}. I'll watch for your funds on ${q.destChain.label} and ask you to confirm the swap."
                 } else {
@@ -565,19 +576,19 @@ class WalletViewModel(
     fun reviewArrivalSwap(jobId: String) {
         val job = bridgeJobs.firstOrNull { it.id == jobId } ?: return
         val asset = job.arrivedAsset
-        if (job.stage != JobStage.ARRIVED || asset == null || network != Network.MAINNET) return
+        if (job.stage != JobStage.ARRIVED || asset == null || job.testnet != isTestnet) return
         val addr = accounts.firstOrNull { it.chain == job.destChain }?.address ?: return
         sending = true
         viewModelScope.launch {
             runCatching {
                 val current = destBalances(job.destChain, listOf(asset)).firstOrNull()
                     ?: error("Could not read your balance on ${job.destChain.label}. Try again.")
-                val reserve = if (asset.id == null) BridgeSwapLogic.gasReserveRaw(job.destChain) else BigInteger.ZERO
+                val reserve = if (asset.id == null) BridgeSwapLogic.gasReserveRaw(job.destChain, job.testnet) else BigInteger.ZERO
                 val amountRaw = BridgeSwapLogic.swapAmountRaw(job, asset, current, reserve)
                     ?: error("The bridged funds are not on ${job.destChain.label} any more (they may already have been swapped). Check History.")
                 val amount = BigDecimal(amountRaw).movePointLeft(asset.decimals)
                 limitError(job.destChain, asset.id, amount)?.let { error(it) }
-                val q = mainnet(job.destChain).quoteSwap(addr, asset, job.target, amount)
+                val q = netProvider(job.destChain).quoteSwap(addr, asset, job.target, amount)
                 val drift = BridgeSwapLogic.priceDriftBps(job.previewInRaw, job.previewOutRaw, q.amountInRaw, q.expectedOutRaw)
                 ArrivalSwap(job, q, BridgeSwapLogic.driftWarning(drift), reserve)
             }
@@ -602,19 +613,19 @@ class WalletViewModel(
             }
             limitError(p.job.destChain, p.quote.from.id, p.quote.amountIn)?.let { message = it; s.fill(0); return@launch }
             coordinator.markSwapping(p.job)
-            bridgeJobs = coordinator.jobs()
+            bridgeJobs = visibleJobs()
             sending = true
-            val r = runCatching { mainnet(p.job.destChain).executeSwap(s, p.quote) }
+            val r = runCatching { netProvider(p.job.destChain).executeSwap(s, p.quote) }
             s.fill(0)
             sending = false
             r.onSuccess {
                 coordinator.markDone(p.job, it.swapTxId)
-                bridgeJobs = coordinator.jobs()
+                bridgeJobs = visibleJobs()
                 message = "Swap submitted. Tx: ${it.swapTxId}"
                 refreshBalances()
             }.onFailure {
                 coordinator.backToArrived(p.job)
-                bridgeJobs = coordinator.jobs()
+                bridgeJobs = visibleJobs()
                 message = "Swap failed: ${it.message}. Your funds are still on ${p.job.destChain.label}; tap Review swap to try again."
             }
         }
@@ -624,7 +635,7 @@ class WalletViewModel(
         val job = bridgeJobs.firstOrNull { it.id == jobId } ?: return
         viewModelScope.launch {
             coordinator.poll(job)
-            bridgeJobs = coordinator.jobs()
+            bridgeJobs = visibleJobs()
         }
     }
 
@@ -634,7 +645,7 @@ class WalletViewModel(
         if (job.stage == JobStage.SWAPPING) return
         watchers.remove(jobId)?.cancel()
         coordinator.dismiss(job)
-        bridgeJobs = coordinator.jobs()
+        bridgeJobs = visibleJobs()
     }
 
     // ---- history ----

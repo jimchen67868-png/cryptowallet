@@ -1,0 +1,41 @@
+{
+ "_note": "Reduced from a REAL Relay testnet POST /quote/v2 response (0.0001 ETH, Sepolia -> Base Sepolia) captured with tools/capture_relay.sh. Only the fields the wallet reads are kept.",
+ "steps": [
+  {
+   "id": "deposit",
+   "kind": "transaction",
+   "requestId": "0x1795062582fec3cdda47925bcc753afef7610b030d407949df8e2d97b231432f",
+   "items": [
+    {
+     "status": "incomplete",
+     "data": {
+      "from": "0xa3a0fccdf214159ce35d4a0066bb32fe10733d67",
+      "to": "0x5feab8db4534f9f7e2669bb260c57a01ad1c12e3",
+      "data": "0x49290c1c000000000000000000000000a3a0fccdf214159ce35d4a0066bb32fe10733d675a71a9666f1446b673615ab56babb72acf25398a136b976cfce7e26fb0775a12",
+      "value": "100000000000000",
+      "chainId": 11155111,
+      "gas": "33400",
+      "maxFeePerGas": "1000000001",
+      "maxPriorityFeePerGas": "999999984"
+     },
+     "check": {
+      "endpoint": "/intents/status/v3?requestId=0x1795062582fec3cdda47925bcc753afef7610b030d407949df8e2d97b231432f",
+      "method": "GET"
+     }
+    }
+   ]
+  }
+ ],
+ "details": {
+  "operation": "swap",
+  "sender": "0xa3a0fccdf214159ce35d4a0066bb32fe10733d67",
+  "recipient": "0xa3a0fccdf214159ce35d4a0066bb32fe10733d67",
+  "currencyIn": {
+   "amount": "100000000000000"
+  },
+  "currencyOut": {
+   "amount": "88697179453965",
+   "minimumAmount": "84421975404284"
+  }
+ }
+}

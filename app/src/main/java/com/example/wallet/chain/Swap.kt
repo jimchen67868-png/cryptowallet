@@ -31,7 +31,8 @@ class SwapQuote(
         get() = BigDecimal(SwapGuard.minOut(expectedOutRaw, slippageBps)).movePointLeft(to.decimals)
 }
 
-class SwapResult(val approvalTxIds: List<String>, val swapTxId: String)
+/** [trackingId] is the id to follow a bridge by when it is not the transaction hash (Relay's requestId). */
+class SwapResult(val approvalTxIds: List<String>, val swapTxId: String, val trackingId: String? = null)
 
 /**
  * Safety checks on aggregator-supplied calldata. The wallet signs whatever transaction the API returns,

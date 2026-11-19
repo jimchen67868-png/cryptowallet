@@ -109,12 +109,22 @@ too). The facet layout is pinned by its function selector; a different LI.FI fac
 Unauthenticated LI.FI limit: 75 quotes per 2 hours per IP. Not run against live networks from the development environment, and
 bridges are the riskiest operation in this app: use a small amount first. BNB Chain and Solana are not bridge targets.
 
-### Relay testnet bridge (planned)
-Relay's testnet API (`api.testnets.relay.link`) supports only Sepolia and Base Sepolia, and only native ETH can be bridged there.
-A caveat to keep in mind: in Relay's flow the on-chain deposit carries a request id, and the destination is bound by Relay's server,
-not by the transaction, so unlike the LI.FI route the wallet cannot prove the recipient from calldata. That is acceptable for test
-funds and is the reason this route is for testnets only. `proxy/relay-worker.js` and `tools/capture_relay.sh` exist; the app route
-is waiting on a captured quote.
+### Relay testnet bridge (test ETH, Sepolia <-> Base Sepolia)
+So the bridge and bridge-then-swap flows can be tried with worthless funds. **Switch to testnet, Swap on the Ethereum (Sepolia) or Base card,
+tap "Move ETH to another network...".** Only ETH, and only between Sepolia and Base Sepolia (Relay's testnets support nothing else; Relay also
+caps test transfers at about $1, so use roughly 0.0001 ETH). With "Then swap on arrival" the job card, arrival watcher and swap step work exactly
+as on mainnet, with the swap done by the Uniswap testnet routes.
+
+How it is checked (`RelayGuard`, tested against a real captured quote, `tools/verify/relay_fixture_sepolia_basesepolia_eth.json`): exactly one
+`deposit` transaction step; the target is Relay's depository contract (pinned; it is the one Relay lists for both testnets); the function is
+`depositNative(address,bytes32)` with you as depositor and the exact amount as value; the status link belongs to the quote; and Relay's own response
+names you as sender and recipient with consistent amounts (fees up to 50% are accepted on testnet because fixed costs dominate tiny amounts: the real
+quote was 11%). Progress is followed by Relay's `requestId` through `/intents/status/v3`.
+
+**Why it is testnet-only:** in Relay's flow the deposit only carries the depositor and an opaque order id. Relay's server, not the transaction, decides where
+the funds go, so unlike the LI.FI route the wallet cannot prove the recipient from calldata; it can only check what Relay claims. Fine for test ETH,
+not for real money. The API is called keyless; Relay may start requiring a key on testnet too, in which case the app says so and `proxy/relay-worker.js`
+(tested, not wired in) is the way to keep a key out of the APK. Not run against live networks from the development environment.
 
 ### Bridge, then swap on arrival
 On the bridge screen, pick **"Swap to X"** under the destination to move funds *and* change asset. It is two separately

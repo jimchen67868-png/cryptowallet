@@ -52,5 +52,4 @@ curl -s -X POST "$PROXY/v1/quotes" -H "X-App-Token: $APP_TOKEN" -H "Content-Type
 `relay-worker.js` is a second Worker, for the Relay API (Relay needs a key on `/quote/v2` since Oct 2, 2026; keys are self-serve in
 dashboard.relay.link, no review). It forwards only `POST /quote/v2` and `GET /intents/status/v3?requestId=0x...`, adds the key as
 `x-api-key`, defaults to the TESTNET API (`RELAY_BASE` selects mainnet), and needs `X-App-Token` like the Across one. Secrets:
-`RELAY_API_KEY` and `APP_TOKEN`. Tests: `node --test relay-worker.test.mjs`. The app side is not built yet: it waits for a real captured
-quote (`tools/capture_relay.sh`) so the transaction guard can be written against actual data.
+`RELAY_API_KEY` and `APP_TOKEN`. Tests: `node --test relay-worker.test.mjs`. The app currently calls Relay's testnet API directly without a key (it worked keyless when the quote was captured), so this Worker is only needed if Relay starts requiring a key there; the app side for using it is not wired in.
