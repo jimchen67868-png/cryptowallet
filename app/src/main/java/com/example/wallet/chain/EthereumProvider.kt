@@ -308,7 +308,7 @@ class EthereumProvider(
 
     // ---- bridging to another network (Across): call data is built here, the API only supplies fee/timing numbers ----
 
-    private val acrossApi: AcrossApi by lazy { AcrossApi() }
+    private val lifi: LiFiApi by lazy { LiFiApi() }
     private val originRoute: BridgeRoute? get() = bridgeRoutes.firstOrNull { it.chain == chain }
 
     override val supportsBridge: Boolean get() = originRoute != null && bridgeRoutes.size > 1
@@ -340,10 +340,13 @@ class EthereumProvider(
 
     private fun nowSeconds() = System.currentTimeMillis() / 1000
 
-    private fun freshFees(plan: BridgePlan, raw: BigInteger, user: String): SuggestedFees {
-        val fees = acrossApi.suggestedFees(plan.route.chainId, plan.dest.chainId, plan.inputToken, plan.outputToken, raw, user)
-        AcrossGuard.validate(fees, plan.route, raw, nowSeconds())?.let { throw IllegalStateException(it) }
-        return fees
+    /** A fresh LI.FI quote for exactly what the user asked for, checked by [LiFiGuard]. Throws with a user-facing reason. */
+    private fun freshQuote(plan: BridgePlan, from: SwapAsset, raw: BigInteger, user: String): LiFiQuote {
+        if (from.id == null) throw IllegalStateException(LiFiGuard.NATIVE_UNSUPPORTED)
+        val req = LiFiRequest(user, plan.route.chainId, plan.dest.chainId, from.id, plan.outputToken, raw)
+        val quote = lifi.quote(req)
+        LiFiGuard.validate(quote, req, nowSeconds())?.let { throw IllegalStateException(it) }
+        return quote
     }
 
     override suspend fun quoteBridge(
@@ -351,11 +354,12 @@ class EthereumProvider(
     ): BridgeQuote = withContext(Dispatchers.IO) {
         val plan = bridgePlan(from, dest)
         val raw = rawAmount(amount, from.decimals)
-        val fees = freshFees(plan, raw, userAddress)
-        val needsApproval = from.id != null && allowance(from.id, userAddress, plan.route.spokePool) < raw
+        val q = freshQuote(plan, from, raw, userAddress)
+        val needsApproval = from.id != null && allowance(from.id, userAddress, q.approvalAddress) < raw
+        // Total cost = LI.FI's 0.25% service fee plus the Across fee.
         BridgeQuote(
-            chain, dest, from, raw, raw.subtract(fees.totalFee), fees.totalFee,
-            plan.decimals, plan.outSymbol, fees.etaSeconds, needsApproval
+            chain, dest, from, raw, q.toAmount, raw.subtract(q.toAmount),
+            plan.decimals, plan.outSymbol, q.executionSeconds, needsApproval
         )
     }
 
@@ -365,39 +369,29 @@ class EthereumProvider(
         val user = creds.address
         val txManager = RawTransactionManager(web3, creds, chainId)
         val raw = quote.amountInRaw
-
-        var fees = freshFees(plan, raw, user)
+        val srcToken = quote.from.id ?: throw IllegalStateException(LiFiGuard.NATIVE_UNSUPPORTED)
         val floor = quote.amountOutRaw.multiply(BigInteger.valueOf(98)).divide(BigInteger.valueOf(100))
-        check(raw.subtract(fees.totalFee) >= floor) { "The bridge fee changed. Please request a new quote." }
 
-        // ERC-20 source: approve exactly this amount to the (allow-listed) SpokePool, never unlimited.
+        var q = freshQuote(plan, quote.from, raw, user)
+        check(q.toAmount >= floor) { "The bridge fee changed. Please request a new quote." }
+
+        // Approve exactly this amount to LI.FI's (pinned) Diamond, never unlimited.
         val approvals = ArrayList<String>()
-        val srcToken = quote.from.id
-        if (srcToken != null) {
-            val current = allowance(srcToken, user, plan.route.spokePool)
-            if (current < raw) {
-                if (current.signum() > 0) approvals.add(sendApproval(txManager, user, srcToken, plan.route.spokePool, BigInteger.ZERO))
-                approvals.add(sendApproval(txManager, user, srcToken, plan.route.spokePool, raw))
-                fees = freshFees(plan, raw, user) // quote timestamps must be recent after waiting for the approval
-                check(raw.subtract(fees.totalFee) >= floor) { "The bridge fee changed. Please request a new quote." }
-            }
+        val current = allowance(srcToken, user, q.approvalAddress)
+        if (current < raw) {
+            if (current.signum() > 0) approvals.add(sendApproval(txManager, user, srcToken, q.approvalAddress, BigInteger.ZERO))
+            approvals.add(sendApproval(txManager, user, srcToken, q.approvalAddress, raw))
+            // LI.FI says to re-fetch after an approval: quote timestamps and gas estimates go stale while it confirms.
+            q = freshQuote(plan, quote.from, raw, user)
+            check(q.toAmount >= floor) { "The bridge fee changed. Please request a new quote." }
         }
 
-        val data = AcrossAbi.depositV3(
-            depositor = user, recipient = user,
-            inputToken = plan.inputToken, outputToken = plan.outputToken,
-            inputAmount = raw, outputAmount = raw.subtract(fees.totalFee),
-            destinationChainId = plan.dest.chainId, exclusiveRelayer = fees.exclusiveRelayer,
-            quoteTimestamp = fees.timestamp, fillDeadline = fees.fillDeadline,
-            exclusivityDeadline = fees.exclusivityDeadline
-        )
-        val value = if (srcToken == null) raw else BigInteger.ZERO
-        // eth_estimateGas inside sendCall fails closed if the SpokePool would reject this call.
-        SwapResult(approvals, sendCall(txManager, user, plan.route.spokePool, value, data))
+        // eth_estimateGas inside sendCall fails closed if the Diamond would reject this call.
+        SwapResult(approvals, sendCall(txManager, user, q.txTo, BigInteger.ZERO, q.txData))
     }
 
     override suspend fun bridgeFillStatus(depositTxId: String): FillStatus = withContext(Dispatchers.IO) {
-        try { acrossApi.depositStatus(depositTxId) } catch (e: Exception) { FillStatus.UNKNOWN }
+        try { lifi.status(depositTxId, chainId.toLong()) } catch (e: Exception) { FillStatus.UNKNOWN }
     }
 
     // ---- swaps on testnets (Uniswap v3): calldata is built here, nothing third-party is signed ----

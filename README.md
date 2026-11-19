@@ -81,37 +81,42 @@ Mainnet EVM lists now include DAI, WBTC, UNI, AAVE, BTCB, WBNB, LINK where each 
 BONK, WIF, mSOL and JitoSOL; because a mistyped base58 mint still looks valid, every Solana mint is verified on-chain (exists, is a mint,
 expected decimals) before a quote is requested. Tokens you add yourself can be swap targets but carry a warning.
 
-## Moving funds to another network (Across, EVM mainnets)
-**Swap screen -> "Move X to another network..."** bridges the same asset between Ethereum, Base, Arbitrum and Polygon
-(native ETH on the three ETH chains; USDC, USDT, DAI, WBTC, WETH, LINK where both chains list the token). To change asset as well,
-bridge first, then use **Swap** on the destination network.
-Design: the wallet builds the SpokePool `depositV3` call itself (you are depositor and recipient), so no third-party calldata is signed.
-The Across API only supplies the fee, timestamps and relayer, which `AcrossGuard` checks: the contract must be the allow-listed
-SpokePool for that chain, the fee at most 5% of the amount, deadlines and timestamps within sane bounds.
-Also: exact-amount approval only, a fresh quote at signing (fee may not worsen by more than 2%), simulation before sending, the $100
-mainnet cap, and a fingerprint/PIN prompt. If a relayer never fills the transfer Across refunds it on the origin chain.
-Not verified against the live API from the development environment, and bridges are the riskiest operation in this app:
-use a small amount first. LI.FI-style routes that swap during bridging are deliberately not offered: their calldata cannot be fully verified.
-BNB Chain and Solana are not bridge targets.
+## Moving funds to another network (LI.FI, routed over Across; EVM mainnets)
+**Swap screen -> "Move X to another network..."** bridges a token between Ethereum, Base, Arbitrum and Polygon (USDC, USDT, DAI, WBTC,
+WETH, LINK where both chains list it). To change asset as well, use **Bridge, then swap on arrival** below, or bridge first and swap after.
 
-### Bridge status: migrating to the Across v1 API (in progress)
-Across deprecated the API the bridge code was written against (`suggested-fees`, `deposit/status`, direct `depositV3`) and now
-requires an API key, which must stay server-side, and has no testnet. Migration is under way:
-- **Done:** `proxy/` (a Cloudflare Worker that holds the key and forwards only `GET /v1/capabilities`, `POST /v1/quotes`,
-  `GET /v1/transfers/{orderId}`; see `proxy/README.md`) and `AcrossProxy.kt` (the app's keyless client, https-only, parses both of
-  Across's error shapes). With no proxy configured the new client refuses to run.
-- **Not done:** switching the bridge screens and the bridge-then-swap watcher over to it. That needs a guard that decodes the
-  deposit transaction Across returns (target contract, function, recipient, amounts) before anything is signed, and I have not
-  yet seen a real response to build it against. Until then the old bridge code is unchanged and probably no longer works.
+**Why LI.FI:** Across deprecated the unauthenticated API this bridge was first written against and now needs a manually approved API key
+that must stay server-side; it also has no testnet. LI.FI's REST API is keyless, and with `allowBridges=across` it routes over Across anyway.
+(`proxy/` and `AcrossProxy.kt` are a finished, tested Across-v1 proxy and client that are not used by default: a fallback if you get a key.)
+
+**What is checked before anything is signed.** The transaction comes from LI.FI (calldata the wallet did not write), so `LiFiGuard`
+decodes it and refuses unless ALL of this holds, with the checks tested against a real captured response
+(`tools/verify/lifi_fixture_arb_base_usdc.json`, decoded independently by `tools/verify/lifi_decode.py`):
+- the target and approval spender are LI.FI's Diamond contract, pinned per chain (`LiFiPins`); the sender is you; no native value;
+- the function is exactly `swapAndStartBridgeTokensViaAcrossV4`, with nothing before or after the expected data;
+- receiver, token, destination chain and amounts match your request; no destination call, no referrer;
+- the one extra step is LI.FI's fee collection: the known fee contract, a single known recipient, at most 1% of the amount, and
+  `bridged amount = amount - fee` exactly (LI.FI's service fee is 0.25%);
+- the Across deposit pays you (recipient and refund address), in the right tokens, with a sane output share and deadlines;
+- you receive at least 95% of what you put in. Total cost = LI.FI 0.25% + Across fee (about 0.4% on a $2 test).
+Also: exact-amount approval only, a fresh quote after the approval confirms, simulation before sending, the $100 mainnet cap and a
+fingerprint/PIN prompt. Status comes from LI.FI `/v1/status` by deposit hash.
+
+**Limits of this release.** Only Arbitrum as the origin chain is pinned: its fee-step contract and recipient were observed in a real
+quote. For Ethereum, Base and Polygon capture a quote with `tools/capture_lifi.sh`, decode it, and add the addresses to `LiFiPins`
+(until then those origins say "isn't enabled in this build yet"). Native ETH is not supported through LI.FI yet (needs a captured sample
+too). The facet layout is pinned by its function selector; a different LI.FI facet or version is refused, not guessed at.
+Unauthenticated LI.FI limit: 75 quotes per 2 hours per IP. Not run against live networks from the development environment, and
+bridges are the riskiest operation in this app: use a small amount first. BNB Chain and Solana are not bridge targets.
 
 ### Bridge, then swap on arrival
 On the bridge screen, pick **"Swap to X"** under the destination to move funds *and* change asset. It is two separately
 authorised steps, because Across fills on the destination chain after the deposit and a swap cannot be part of that transaction:
-1. **Bridge** (as above: caps, `AcrossGuard`, fingerprint/PIN). Before sending, the wallet checks you have gas on the destination
+1. **Bridge** (as above: caps, `LiFiGuard`, fingerprint/PIN). Before sending, the wallet checks you have gas on the destination
    chain (not needed when bridging native ETH to an ETH-gas chain), takes an indicative swap quote, and records your destination
    balances. Nothing is sent if any of that fails.
-2. **Swap on arrival.** A job card appears on Home and the wallet polls Across `/deposit/status` plus your destination balance.
-   Arrival = balance up by >= 99.9% of the quoted amount **and** Across says `filled` (or Across is unreachable). When it lands
+2. **Swap on arrival.** A job card appears on Home and the wallet polls LI.FI `/v1/status` plus your destination balance.
+   Arrival = balance up by >= 99.9% of the quoted amount **and** LI.FI reports DONE/COMPLETED (or the status API is unreachable or does not know the transfer yet). When it lands
    you tap **Review swap**: a FRESH ParaSwap quote is taken from the real arrived amount (never more than quoted), `SwapGuard`
    checks the calldata as for any swap, the $100 cap is re-applied, and you confirm with fingerprint/PIN again. A warning shows
    if the price is more than 3% worse than the preview.

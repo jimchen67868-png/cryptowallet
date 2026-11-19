@@ -600,9 +600,10 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
             modifier = Modifier.fillMaxWidth()
         ) { Text("Get quote") }
         Text(
-            "Your funds move between blockchains through Across, a third-party protocol. It takes minutes and cannot be undone. " +
-                "The wallet builds the transaction itself, so only the fee and timing come from Across, and they are checked " +
-                "before anything is signed. Start with a small amount.",
+            "Your funds move between blockchains through LI.FI, routed over Across: both are third parties. It takes minutes and " +
+                "cannot be undone. The transaction comes from LI.FI, so the wallet decodes it and refuses to sign unless the " +
+                "receiver, token, amounts and fees match what you asked for. Fees include LI.FI's 0.25% service fee. " +
+                "Start with a small amount. Tokens only for now (USDC, WETH...), not the native coin.",
             style = MaterialTheme.typography.bodySmall
         )
         TextButton(onClick = vm::back) { Text("Back") }
@@ -625,7 +626,7 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
                                 "That is a second step with a fresh quote and its own fingerprint/PIN prompt. " +
                                 "Arrival is only watched while the app is open and unlocked; if the funds land first they simply wait on ${q.destChain.label}.\n"
                         } ?: "") +
-                        "\nIf the transfer is not filled in time, Across refunds it to you on ${q.chain.label}. This cannot be undone."
+                        "\nIf the transfer is not filled in time, it is refunded to you on ${q.chain.label}. This cannot be undone."
                 )
             },
             confirmButton = { TextButton(onClick = { vm.confirmBridge(activity) }) { Text("Bridge") } },
