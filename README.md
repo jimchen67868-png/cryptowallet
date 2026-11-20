@@ -181,3 +181,13 @@ custom-token list, fee estimate (via `eth_estimateGas`) and explorer links.
 - web3j on Android can need packaging excludes (already set in app/build.gradle.kts). If R8 is enabled for release, add keep rules for web3j/BouncyCastle.
 - targetSdk is 34; raise it to the current Play Store requirement before publishing.
 - Back up `local.properties`-style secrets never; this app has none. Don't add API keys to source control.
+
+## Crash reports and a known Compose bug
+- **Crash reporter:** if the app crashes, the stack trace is saved privately on the phone and shown on the next launch with Copy / Dismiss
+  (no keys or seed, but it can contain addresses or amounts; never uploaded automatically). Unexpected errors in background work show
+  "Something went wrong (...)" instead of closing the app.
+- **Compose cursor-anchor crash:** a `NullPointerException` in `LegacyCursorAnchorInfoController.updateCursorAnchorInfo` closes the app when the
+  keyboard asks for cursor positions while a text field is being laid out (Google issue tracker 313010266, still reported on 2026 Compose
+  versions). `UiCrashGuard` swallows exactly that error and nothing else (everything else still crashes and is recorded), and gives up if it
+  repeats more than 20 times in 2 seconds. If minification (R8) is ever enabled for release builds, keep the class and method names
+  `*CursorAnchorInfoController.updateCursorAnchorInfo`, or the guard will not recognise the error.
