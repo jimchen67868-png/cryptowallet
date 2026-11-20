@@ -29,6 +29,7 @@ class WalletApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        com.example.wallet.data.CrashReporter.install(this)
         container = AppContainer(this)
     }
 }

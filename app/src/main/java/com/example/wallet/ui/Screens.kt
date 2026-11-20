@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -20,6 +21,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -94,6 +97,7 @@ fun WalletRoot(vm: WalletViewModel, activity: FragmentActivity) {
                 Screen.MainnetWarning -> MainnetWarningScreen(vm)
             }
             ArrivalSwapDialog(vm, activity)
+            CrashDialog()
         }
     }
 }
@@ -546,7 +550,9 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
     var thenIndex by remember { mutableStateOf(-1) }
     var amount by remember { mutableStateOf("") }
     val available = from?.balance ?: vm.accounts.firstOrNull { it.chain == chain }?.balance
-    val swapOptions = destinations.getOrNull(destIndex)?.let { vm.swapTargetsAfterBridge(chain, from, it) }.orEmpty()
+    val swapOptions = remember(destIndex, chain, from?.id) {
+        destinations.getOrNull(destIndex)?.let { vm.swapTargetsAfterBridge(chain, from, it) }.orEmpty()
+    }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Move $symbol to another network", style = MaterialTheme.typography.headlineSmall)
@@ -808,5 +814,40 @@ private fun ArrivalSwapDialog(vm: WalletViewModel, activity: FragmentActivity) {
         },
         confirmButton = { TextButton(onClick = { vm.confirmArrivalSwap(activity) }) { Text("Swap") } },
         dismissButton = { TextButton(onClick = vm::cancelArrivalSwap) { Text("Cancel") } }
+    )
+}
+
+/** Shows the saved crash trace after a crash, so it can be copied and sent for diagnosis. Never uploaded automatically. */
+@Composable
+private fun CrashDialog() {
+    val context = LocalContext.current
+    var trace by remember { mutableStateOf(com.example.wallet.data.CrashReporter.log?.pending()) }
+    val text = trace ?: return
+    AlertDialog(
+        onDismissRequest = { },
+        title = { Text("The app had a problem") },
+        text = {
+            Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                Text(
+                    "This is a technical error report saved on your phone. It contains no keys or seed phrase, but it can " +
+                        "include wallet addresses or amounts, so only share it with someone you trust.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(text, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("crash report", text))
+            }) { Text("Copy") }
+        },
+        dismissButton = {
+            TextButton(onClick = {
+                com.example.wallet.data.CrashReporter.log?.clear()
+                trace = null
+            }) { Text("Dismiss") }
+        }
     )
 }

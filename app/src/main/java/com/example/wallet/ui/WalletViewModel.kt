@@ -31,6 +31,7 @@ import com.example.wallet.data.CoinIds
 import com.example.wallet.data.Network
 import com.example.wallet.data.PriceService
 import com.example.wallet.data.WalletRepository
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -124,6 +125,16 @@ class WalletViewModel(
     var network by mutableStateOf(settings.network)
         private set
 
+    /**
+     * Safety net for every background job: an unexpected exception becomes a message (and a saved trace) instead of
+     * closing the app. Cancellation is not an error and never reaches this.
+     */
+    private val guard = CoroutineExceptionHandler { _, e ->
+        sending = false
+        com.example.wallet.data.CrashReporter.recordHandled(e)
+        message = "Something went wrong (${e::class.java.simpleName}): ${e.message.orEmpty().take(160)}"
+    }
+
     val providers: List<ChainProvider> get() = providersFor(network)
 
     val isTestnet: Boolean get() = providers.any { it.isTestnet }
@@ -163,7 +174,7 @@ class WalletViewModel(
     fun confirmBackup(activity: FragmentActivity, answers: List<String>) {
         val ok = confirmIndices.zip(answers).all { (i, a) -> pendingWords[i] == a.trim().lowercase() }
         if (!ok) { message = "Those words don't match. Check your backup."; return }
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             val words = pendingWords
             if (runCatching { repo.saveWallet(activity, words) }.getOrDefault(false)) {
                 pendingWords = emptyList()
@@ -176,7 +187,7 @@ class WalletViewModel(
 
     // ---- import / unlock / reset ----
     fun importWallet(activity: FragmentActivity, phrase: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             val words = runCatching { repo.importWallet(activity, phrase) }.getOrNull()
             if (words == null) message = "Invalid phrase or authentication cancelled."
             else startSession(words)
@@ -184,7 +195,7 @@ class WalletViewModel(
     }
 
     fun unlock(activity: FragmentActivity) {
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             val words = runCatching { repo.unlockMnemonic(activity) }.getOrElse {
                 message = "Could not unlock. If your device security changed, reset and restore with your phrase."
                 return@launch
@@ -237,13 +248,13 @@ class WalletViewModel(
         refreshPrices()
         accounts.forEach { acc ->
             val provider = providers.first { it.chain == acc.chain }
-            viewModelScope.launch {
+            viewModelScope.launch(guard) {
                 val result = runCatching { provider.getBalance(acc.address) }
                 accounts = accounts.map {
                     if (it.chain == acc.chain) it.copy(balance = result.getOrNull(), error = result.isFailure) else it
                 }
             }
-            viewModelScope.launch {
+            viewModelScope.launch(guard) {
                 runCatching { provider.getTokenBalances(acc.address) }.onSuccess { list ->
                     if (accounts.any { it.chain == acc.chain }) tokens = tokens + (acc.chain to list)
                 }
@@ -295,7 +306,7 @@ class WalletViewModel(
 
     // ---- prices ----
     private fun refreshPrices() {
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             runCatching { priceService.fetchUsd() }.onSuccess { if (it.isNotEmpty()) prices = it }
         }
     }
@@ -335,7 +346,7 @@ class WalletViewModel(
         if (balance != null && amount > balance) { message = "Amount exceeds your ${fromAsset.symbol} balance"; return }
         limitError(chain, from?.id, amount)?.let { message = it; return }
         sending = true
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             runCatching { provider.quoteSwap(acc.address, fromAsset, to, amount) }
                 .onSuccess { pendingSwap = it }
                 .onFailure { message = it.message ?: "Could not get a quote" }
@@ -350,7 +361,7 @@ class WalletViewModel(
         pendingSwap = null
         val provider = providers.first { it.chain == q.chain }
         val s = seed?.copyOf() ?: return
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             if (network == Network.MAINNET && !repo.confirmIdentity(activity, "Confirm mainnet swap")) {
                 message = "Authentication cancelled. Nothing was sent."
                 s.fill(0)
@@ -424,7 +435,7 @@ class WalletViewModel(
 
     private fun startWatching(jobId: String) {
         if (watchers[jobId]?.isActive == true) return
-        watchers[jobId] = viewModelScope.launch {
+        watchers[jobId] = viewModelScope.launch(guard) {
             while (true) {
                 if (seed == null) return@launch
                 val job = bridgeJobs.firstOrNull { it.id == jobId } ?: return@launch
@@ -444,12 +455,18 @@ class WalletViewModel(
     }
 
     /** Curated assets on [dest] that the bridged funds can be swapped into (never the bridged asset itself). */
-    fun swapTargetsAfterBridge(chain: Chain, from: TokenBalance?, dest: Chain): List<SwapAsset> {
+    fun swapTargetsAfterBridge(chain: Chain, from: TokenBalance?, dest: Chain): List<SwapAsset> = try {
         val fromAsset = SwapAsset(from?.id, from?.symbol ?: chain.symbol, from?.decimals ?: 18)
         val cands = bridgeCandidates(fromAsset, chain, dest)
-        if (cands.isEmpty()) return emptyList()
-        val keys = cands.map { SwapGuard.tokenKey(it) }.toSet()
-        return netProvider(dest).swapAssets().filter { it.curated && SwapGuard.tokenKey(it) !in keys }
+        if (cands.isEmpty()) emptyList()
+        else {
+            val keys = cands.map { SwapGuard.tokenKey(it) }.toSet()
+            netProvider(dest).swapAssets().filter { it.curated && SwapGuard.tokenKey(it) !in keys }
+        }
+    } catch (e: Exception) {
+        // Called while the screen is drawn: an unknown route must give "no options", never a crash.
+        com.example.wallet.data.CrashReporter.recordHandled(e)
+        emptyList()
     }
 
     fun requestBridgeQuote(
@@ -466,7 +483,7 @@ class WalletViewModel(
         if (balance != null && amount > balance) { message = "Amount exceeds your ${fromAsset.symbol} balance"; return }
         limitError(chain, from?.id, amount)?.let { message = it; return }
         sending = true
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             runCatching {
                 val q = provider.quoteBridge(acc.address, fromAsset, dest, amount)
                 q to thenSwapTo?.let { buildCombo(q, it, acc.address) }
@@ -516,7 +533,7 @@ class WalletViewModel(
         pendingCombo = null
         val provider = providers.first { it.chain == q.chain }
         val s = seed?.copyOf() ?: return
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             if (!repo.confirmIdentity(activity, "Confirm bridge")) {
                 message = "Authentication cancelled. Nothing was sent."
                 s.fill(0)
@@ -577,7 +594,7 @@ class WalletViewModel(
         if (job.stage != JobStage.ARRIVED || asset == null || job.testnet != isTestnet) return
         val addr = accounts.firstOrNull { it.chain == job.destChain }?.address ?: return
         sending = true
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             runCatching {
                 val current = destBalances(job.destChain, listOf(asset)).firstOrNull()
                     ?: error("Could not read your balance on ${job.destChain.label}. Try again.")
@@ -602,7 +619,7 @@ class WalletViewModel(
         val p = pendingArrival ?: return
         pendingArrival = null
         val s = seed?.copyOf() ?: return
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             // A fresh fingerprint/PIN for this leg, separate from the one that approved the bridge.
             if (!repo.confirmIdentity(activity, "Confirm swap of bridged funds")) {
                 message = "Authentication cancelled. Nothing was swapped. Your funds are still on ${p.job.destChain.label}."
@@ -631,7 +648,7 @@ class WalletViewModel(
 
     fun recheckBridgeJob(jobId: String) {
         val job = bridgeJobs.firstOrNull { it.id == jobId } ?: return
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             coordinator.poll(job)
             bridgeJobs = visibleJobs()
         }
@@ -656,7 +673,7 @@ class WalletViewModel(
         val acc = accounts.firstOrNull { it.chain == chain } ?: return
         val provider = providers.first { it.chain == chain }
         history = HistoryUi.Loading
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             val r = runCatching { provider.getHistory(acc.address) }
             if ((screen as? Screen.History)?.chain != chain) return@launch // user navigated away
             history = r.fold(
@@ -672,7 +689,7 @@ class WalletViewModel(
     // ---- tokens ----
     fun addToken(chain: Chain, contract: String) {
         val provider = providers.first { it.chain == chain }
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             runCatching { provider.addToken(contract.trim()) }
                 .onSuccess { message = "Token added"; refreshBalances() }
                 .onFailure { message = it.message ?: "Could not add token" }
@@ -698,7 +715,7 @@ class WalletViewModel(
         }
         limitError(chain, token?.id, amount)?.let { message = it; return }
         sending = true
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             runCatching {
                 if (token != null) provider.estimateTokenFee(acc.address, token, target, amount)
                 else provider.estimateFee(acc.address, target, amount)
@@ -719,7 +736,7 @@ class WalletViewModel(
             return
         }
         // Mainnet: require fingerprint/PIN again right before signing.
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             if (!repo.confirmIdentity(activity, "Confirm mainnet transaction")) {
                 message = "Authentication cancelled. Nothing was sent."
                 return@launch
@@ -737,7 +754,7 @@ class WalletViewModel(
         if (!provider.isValidAddress(target)) { message = "Invalid ${chain.symbol} address"; s.fill(0); return }
         limitError(chain, token?.id, amount)?.let { message = it; s.fill(0); return }
         sending = true
-        viewModelScope.launch {
+        viewModelScope.launch(guard) {
             val r = runCatching {
                 if (token != null) provider.sendToken(s, token, target, amount)
                 else provider.send(s, target, amount)
