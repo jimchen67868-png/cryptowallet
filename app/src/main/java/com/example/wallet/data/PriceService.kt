@@ -16,7 +16,8 @@ object CoinIds {
     private val NATIVE = mapOf(
         Chain.BTC to "bitcoin", Chain.ETH to "ethereum", Chain.SOL to "solana",
         Chain.BASE to "ethereum", Chain.ARB to "ethereum",
-        Chain.POL to "polygon-ecosystem-token", Chain.BNB to "binancecoin"
+        Chain.POL to "polygon-ecosystem-token", Chain.BNB to "binancecoin",
+        Chain.LTC to "litecoin", Chain.TRX to "tron"
     )
 
     // Our own curated token lists only: the symbol is matched here, never for user-supplied tokens.
@@ -47,7 +48,9 @@ object CoinIds {
         "SOL:DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263" to "bonk",
         "SOL:EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm" to "dogwifcoin",
         "SOL:mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So" to "msol",
-        "SOL:J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn" to "jito-staked-sol"
+        "SOL:J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn" to "jito-staked-sol",
+        // Tron mainnet (case-sensitive Base58 contract): USDT only
+        "TRX:TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" to "tether"
     ) + curated(Chain.ETH, EthereumProvider.MAINNET_TOKENS) +
         curated(Chain.POL, EvmTokens.POLYGON) +
         curated(Chain.BNB, EvmTokens.BNB) +

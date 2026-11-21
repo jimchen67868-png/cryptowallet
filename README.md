@@ -170,6 +170,27 @@ custom-token list, fee estimate (via `eth_estimateGas`) and explorer links.
 - Adding another EVM chain = one `evm(...)` line in `AppContainer` plus a `Chain` enum entry and a CoinGecko id in `CoinIds`.
 - Gas uses legacy pricing (`eth_gasPrice`); fee shown for L2s excludes the small L1 data fee on Base.
 
+## Litecoin and Tron
+**Litecoin (LTC)**: native SegWit (`ltc1q...`, BIP-84 path `m/84'/2'/0'/0/0`; testnet `tltc1q...`, coin type 1). It reuses the Bitcoin
+implementation (BIP-143 signing is identical): UTXOs, fee rate and broadcast come from the Litecoin Foundation's keyless
+`litecoinspace.org` API (a mempool.space fork), explorer links go to the same site. Destinations may be `ltc1...`, `L...`, `M...`
+and legacy `3...` addresses. MWEB (`ltcmweb1...`) addresses are rejected. Dust limit is 5460 sats.
+Testnet coins: any Litecoin testnet faucet (e.g. tltc.bitaps.com).
+
+**Tron (TRX) and USDT (TRC-20)**: address `T...` from path `m/44'/195'/0'/0/0` (same as TronLink/Ledger). Transactions are built and signed
+locally (hand-written protobuf in `TronTx`); TronGrid (keyless) only supplies a block reference, balances, fee parameters and the broadcast.
+The transaction id reported by the node must equal the locally computed one. Testnet is Nile (faucet: nileex.io), mainnet lists USDT only
+(Circle stopped issuing USDC on Tron, so it is not listed). Only tokens from the built-in list are shown or sendable.
+Things that differ from other chains and are included in the fee shown before you confirm:
+- Sending TRX to an address that has never been used burns an extra ~1 TRX (account creation).
+- A USDT transfer needs "energy". Without staked TRX the energy is burned from your TRX balance: several TRX, more if the recipient holds no USDT yet.
+  You need TRX in the same wallet to send USDT. The fee estimate comes from a `triggerconstantcontract` simulation; `fee_limit` is the estimate + 25% (max 200 TRX).
+- The $100 mainnet cap applies to the amount of TRX/USDT, not to the fee.
+Not supported: staking/resources, TRC-10 tokens, swaps and bridges for LTC/TRX, custom TRC-20 tokens.
+Verified here: addresses (priv key 1 and the standard mnemonic), the protobuf bytes and txID against published TronGrid captures,
+signing against an independent Python implementation. **Not run against live networks from the dev environment:** the first real use
+should be a few dollars (or Nile/Litecoin testnet coins).
+
 ## What works
 - Create / import wallet, backup confirmation, biometric/PIN unlock
 - Mnemonic encrypted with an AES-256-GCM key in the Android Keystore; seed kept in memory only while unlocked and wiped when the app is backgrounded
@@ -190,7 +211,7 @@ custom-token list, fee estimate (via `eth_estimateGas`) and explorer links.
 ## Layout
 - `security/`  Keystore encryption + biometric prompt
 - `crypto/`    BIP-39, BIP-32, SLIP-10, Base58, Bech32
-- `chain/`     `ChainProvider` interface + ETH/BTC/SOL implementations
+- `chain/`     `ChainProvider` interface + ETH/BTC/LTC/SOL/TRX implementations
 - `data/`      `WalletRepository`
 - `ui/`        ViewModel + Compose screens
 

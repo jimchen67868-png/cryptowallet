@@ -428,7 +428,7 @@ private fun NetworkScreen(vm: WalletViewModel) {
         Text("Network", style = MaterialTheme.typography.headlineSmall)
         Text(
             if (mainnet) "You are on MAINNET. Balances and sends use real funds."
-            else "You are on test networks (Sepolia, Bitcoin testnet, Solana devnet). Coins here have no real value."
+            else "You are on test networks (Sepolia, Bitcoin/Litecoin testnet, Solana devnet, Tron Nile). Coins here have no real value."
         )
         if (mainnet) {
             Button(onClick = { vm.switchNetwork(Network.TESTNET) }, modifier = Modifier.fillMaxWidth()) {

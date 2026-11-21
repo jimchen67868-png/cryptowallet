@@ -9,3 +9,6 @@ code so a mistake would have to be made twice, in two languages, to go unnoticed
     python3 golden.py              # prints the golden values used by the Kotlin tests + validates constants
 
 The Kotlin tests in `app/src/test` contain the expected values these scripts produce.
+
+    python3 tron_golden.py         # Tron/Litecoin: asserts the priv-key-1 address and published TronGrid raw_data captures,
+                                   # prints the golden values used by TronTest and LitecoinTest

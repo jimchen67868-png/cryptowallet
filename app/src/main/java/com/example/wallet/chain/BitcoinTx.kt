@@ -138,7 +138,7 @@ object CoinSelection {
     fun vsize(inputs: Int, destScriptSize: Int, withChange: Boolean): Int =
         11 + 68 * inputs + (9 + destScriptSize) + (if (withChange) 31 else 0)
 
-    fun select(utxos: List<Utxo>, sats: Long, destScriptSize: Int, feeRate: Double): Plan {
+    fun select(utxos: List<Utxo>, sats: Long, destScriptSize: Int, feeRate: Double, dust: Long = DUST): Plan {
         require(sats > 0) { "Amount must be positive" }
         require(feeRate > 0) { "Fee rate must be positive" }
         val sorted = utxos.sortedByDescending { it.value }
@@ -155,7 +155,7 @@ object CoinSelection {
             val feeWithChange = fee(selected.size, true)
             if (total >= sats + feeWithChange) {
                 val change = total - sats - feeWithChange
-                return if (change >= DUST) Plan(selected.toList(), feeWithChange, change)
+                return if (change >= dust) Plan(selected.toList(), feeWithChange, change)
                 else Plan(selected.toList(), total - sats, 0) // dust change goes to the miner
             }
             if (total >= sats + fee(selected.size, false)) {

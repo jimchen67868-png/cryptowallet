@@ -15,6 +15,10 @@ import kotlin.math.ceil
  * Bitcoin, native SegWit (P2WPKH, BIP-84), single receive/change address at index 0.
  * Defaults to testnet; for mainnet use hrp "bc", coinType 0, versions 0x00/0x05 and a mainnet API.
  * Uses the mempool.space REST API for UTXOs, fee rates and broadcasting.
+ *
+ * The same class serves Litecoin ([Chain.LTC]): its SegWit transactions use the identical BIP-143 signing, only the
+ * address prefixes, the SLIP-44 coin type, the dust limit and the (mempool-compatible) explorer API differ.
+ * See [litecoin].
  */
 class BitcoinProvider(
     private val apiBase: String = "https://mempool.space/testnet/api",
@@ -22,13 +26,16 @@ class BitcoinProvider(
     private val coinType: Int = 1,
     private val p2pkhVersion: Int = 0x6f,
     private val p2shVersion: Int = 0xc4,
-    private val explorerTxUrl: String = "https://mempool.space/testnet/tx/"
+    private val explorerTxUrl: String = "https://mempool.space/testnet/tx/",
+    override val chain: Chain = Chain.BTC,
+    override val isTestnet: Boolean = hrp != "bc",
+    /** Extra Base58 script-hash version bytes accepted as destinations (Litecoin's legacy "3..." / "2..." P2SH). */
+    private val extraP2shVersions: Set<Int> = emptySet(),
+    private val dust: Long = CoinSelection.DUST
 ) : ChainProvider {
 
-    override val chain = Chain.BTC
     override val supportsSend = true
     override val nativeDecimals = 8
-    override val isTestnet = hrp != "bc"
     override val networkName = if (isTestnet) "Testnet" else "Mainnet"
 
     // m/84'/coinType'/0'/0/0
@@ -129,7 +136,7 @@ class BitcoinProvider(
                 timeSec = time,
                 direction = direction,
                 amount = BigDecimal.valueOf(sats).movePointLeft(8),
-                symbol = "BTC",
+                symbol = chain.symbol,
                 counterparty = counterparty,
                 status = if (confirmed) TxStatus.CONFIRMED else TxStatus.PENDING
             )
@@ -142,9 +149,9 @@ class BitcoinProvider(
         val sats = try {
             amount.movePointRight(8).toBigIntegerExact().toLong()
         } catch (e: ArithmeticException) {
-            throw IllegalArgumentException("Bitcoin amounts allow at most 8 decimal places")
+            throw IllegalArgumentException("${chain.label} amounts allow at most 8 decimal places")
         }
-        require(sats >= DUST) { "Amount is below the dust limit ($DUST sats)" }
+        require(sats >= dust) { "Amount is below the dust limit ($dust sats)" }
         return sats
     }
 
@@ -167,7 +174,7 @@ class BitcoinProvider(
     }
 
     private fun plan(address: String, destScript: ByteArray, sats: Long): CoinSelection.Plan =
-        CoinSelection.select(fetchUtxos(address), sats, destScript.size, feeRate())
+        CoinSelection.select(fetchUtxos(address), sats, destScript.size, feeRate(), dust)
 
     /** Output script for any supported destination address, or null if invalid. */
     internal fun scriptForAddress(address: String): ByteArray? {
@@ -190,11 +197,28 @@ class BitcoinProvider(
         return when (payload[0].toInt() and 0xff) {
             p2pkhVersion -> byteArrayOf(0x76, 0xa9.toByte(), 0x14) + hash + byteArrayOf(0x88.toByte(), 0xac.toByte())
             p2shVersion -> byteArrayOf(0xa9.toByte(), 0x14) + hash + byteArrayOf(0x87.toByte())
+            in extraP2shVersions -> byteArrayOf(0xa9.toByte(), 0x14) + hash + byteArrayOf(0x87.toByte())
             else -> null
         }
     }
 
-    private companion object {
-        const val DUST = CoinSelection.DUST
+    companion object {
+        /**
+         * Litecoin, BIP-84 native SegWit (`ltc1q...`, path m/84'/2'/0'/0/0), via the Litecoin Foundation's
+         * mempool-compatible Litecoin Space API. Testnet uses `tltc1q...` and coin type 1.
+         * Dust is set to 5460 sats (what Litecoin tooling uses; Litecoin's relay rules are stricter than Bitcoin's).
+         * MWEB addresses (`ltcmweb1...`) are not supported and are rejected as invalid.
+         */
+        fun litecoin(testnet: Boolean = false) = if (testnet) BitcoinProvider(
+            apiBase = "https://litecoinspace.org/testnet/api", hrp = "tltc", coinType = 1,
+            p2pkhVersion = 0x6f, p2shVersion = 0x3a, explorerTxUrl = "https://litecoinspace.org/testnet/tx/",
+            chain = Chain.LTC, isTestnet = true, extraP2shVersions = setOf(0xc4), dust = LTC_DUST
+        ) else BitcoinProvider(
+            apiBase = "https://litecoinspace.org/api", hrp = "ltc", coinType = 2,
+            p2pkhVersion = 0x30, p2shVersion = 0x32, explorerTxUrl = "https://litecoinspace.org/tx/",
+            chain = Chain.LTC, isTestnet = false, extraP2shVersions = setOf(0x05), dust = LTC_DUST
+        )
+
+        const val LTC_DUST = 5460L
     }
 }

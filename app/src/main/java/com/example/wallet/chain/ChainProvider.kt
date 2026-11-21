@@ -10,7 +10,9 @@ enum class Chain(val symbol: String, val label: String, val isEvm: Boolean = fal
     BASE("ETH", "Base", true),
     ARB("ETH", "Arbitrum", true),
     POL("POL", "Polygon", true),
-    BNB("BNB", "BNB Chain", true)
+    BNB("BNB", "BNB Chain", true),
+    LTC("LTC", "Litecoin"),
+    TRX("TRX", "Tron")
 }
 
 /** A fungible token balance (ERC-20 contract or SPL mint). */
