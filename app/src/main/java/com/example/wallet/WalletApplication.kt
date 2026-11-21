@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import com.example.wallet.chain.AcrossRoutes
 import com.example.wallet.chain.BitcoinProvider
+import com.example.wallet.chain.CcipTestnet
 import com.example.wallet.chain.BridgeRoute
 import com.example.wallet.chain.Chain
 import com.example.wallet.chain.ChainProvider
@@ -51,7 +52,7 @@ class AppContainer(context: Context) {
         chain: Chain, rpc: String, chainId: Long, tokens: TokenStore, testnet: Boolean,
         testnetName: String, known: List<TokenInfo>, historyApi: String?, explorerTx: String,
         swapId: Int? = null, uniswap: UniswapV3Config? = null,
-        bridgeRoutes: List<BridgeRoute> = emptyList(), relayTestnet: Boolean = false
+        bridgeRoutes: List<BridgeRoute> = emptyList(), relayTestnet: Boolean = false, ccipTestnet: Boolean = false
     ) = EthereumProvider(
         tokenStore = tokens,
         rpcUrl = rpc,
@@ -65,12 +66,13 @@ class AppContainer(context: Context) {
         swapNetworkId = swapId,
         uniswap = uniswap,
         bridgeRoutes = bridgeRoutes,
-        relayTestnet = relayTestnet
+        relayTestnet = relayTestnet,
+        ccipTestnet = ccipTestnet
     )
 
     private val testnetProviders: List<ChainProvider> by lazy {
         listOf(
-            EthereumProvider(testnetTokens, uniswap = UniswapDeployments.SEPOLIA, uniswapV2 = UniswapV2Deployments.SEPOLIA, relayTestnet = true), BitcoinProvider(), SolanaProvider(),
+            EthereumProvider(testnetTokens, uniswap = UniswapDeployments.SEPOLIA, uniswapV2 = UniswapV2Deployments.SEPOLIA, relayTestnet = true, ccipTestnet = true), BitcoinProvider(), SolanaProvider(),
             evm(Chain.BASE, "https://base-sepolia-rpc.publicnode.com", 84532L, testnetTokens, true,
                 "Sepolia testnet", emptyList(), "https://base-sepolia.blockscout.com/api/v2", "https://sepolia.basescan.org/tx/", uniswap = UniswapDeployments.BASE_SEPOLIA, relayTestnet = true),
             evm(Chain.ARB, "https://arbitrum-sepolia-rpc.publicnode.com", 421614L, testnetTokens, true,
@@ -78,7 +80,8 @@ class AppContainer(context: Context) {
             evm(Chain.POL, "https://polygon-amoy-bor-rpc.publicnode.com", 80002L, testnetTokens, true,
                 "Amoy testnet", emptyList(), null, "https://amoy.polygonscan.com/tx/"),
             evm(Chain.BNB, "https://bsc-testnet-rpc.publicnode.com", 97L, testnetTokens, true,
-                "Testnet", emptyList(), null, "https://testnet.bscscan.com/tx/")
+                "Testnet", listOf(com.example.wallet.data.TokenInfo(CcipTestnet.BNB_TESTNET.bnm, CcipTestnet.BNM_SYMBOL, CcipTestnet.BNM_DECIMALS)),
+                null, "https://testnet.bscscan.com/tx/", ccipTestnet = true)
         )
     }
 

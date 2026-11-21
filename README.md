@@ -126,6 +126,24 @@ the funds go, so unlike the LI.FI route the wallet cannot prove the recipient fr
 not for real money. The API is called keyless; Relay may start requiring a key on testnet too, in which case the app says so and `proxy/relay-worker.js`
 (tested, not wired in) is the way to keep a key out of the APK. Not run against live networks from the development environment.
 
+### CCIP testnet bridge (CCIP-BnM test token, Sepolia <-> BNB testnet)
+Chainlink CCIP has an official Sepolia <-> BNB Chain testnet lane. **Switch to testnet, tap "Get test CCIP-BnM" on the Ethereum (Sepolia) or BNB card**
+(it calls the token's public `drip(address)` faucet), wait for the balance to appear, then **Swap -> "Move CCIP-BnM to another network..."**.
+You need a little ETH (Sepolia) or BNB (testnet) on the source chain for the CCIP fee and gas. Only CCIP-BnM moves: CCIP cannot bridge native coins.
+
+How it works, and why it is safer than the Relay testnet route: the wallet calls Chainlink's on-chain Router directly (no API, no key) and builds the transaction
+itself, so your address, the token and the amount are in calldata the wallet wrote. It reads the exact fee from the Router (`getFee`; the Router refuses an unsupported
+token or lane there), refuses a zero or above-0.05 fee, approves the exact amount to the Router (never unlimited), re-reads the fee after the approval confirms and
+refuses if it rose by more than 50%, then sends `ccipSend` with the fee as `msg.value` (a simulation runs first). Arrival is detected by the destination balance, as for
+the other routes (CCIP jobs are tagged `ccip:<tx>` so no status API is consulted).
+
+Verified against Chainlink's docs: router addresses and chain selectors for both chains, the CCIP-BnM addresses (matched to the official token directory and an
+independent source), the `EVM2AnyMessage` field order, and the `GenericExtraArgsV2` tag (still accepted on CCIP 2.0 lanes). All four addresses pass EIP-55 and the function
+selectors match their signatures. `tools/verify/ccip_golden.py` is an independent ABI encoder that produced the golden values in `CcipTest`; the test also cross-checks web3j's
+own encoder. Not verified: delivery time, fee size, and anything on live networks. Bridge-then-swap with CCIP-BnM only works if a Uniswap pool exists for the pair on the
+destination (unlikely for a faucet token), so expect "no pool" there; it is bridge-only in practice. Base Sepolia and Arbitrum Sepolia are not included yet (their
+CCIP-BnM addresses are not verified).
+
 ### Bridge, then swap on arrival
 On the bridge screen, pick **"Swap to X"** under the destination to move funds *and* change asset. It is two separately
 authorised steps, because Across fills on the destination chain after the deposit and a swap cannot be part of that transaction:

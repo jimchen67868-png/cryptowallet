@@ -54,7 +54,9 @@ class EthereumProvider(
     /** Uniswap v2 router, tried alongside [uniswap] on testnets. Only used when [uniswap] is set too. */
     private val uniswapV2: UniswapV2Config? = null,
     /** Bridge TEST ETH to the other Relay testnet (Sepolia <-> Base Sepolia). Never set on mainnet. */
-    private val relayTestnet: Boolean = false
+    private val relayTestnet: Boolean = false,
+    /** Bridge the CCIP-BnM test token between Sepolia and BNB testnet through Chainlink CCIP. Never set on mainnet. */
+    private val ccipTestnet: Boolean = false
 ) : ChainProvider {
 
     override val chain = evmChain
@@ -313,13 +315,82 @@ class EthereumProvider(
     private val lifi: LiFiApi by lazy { LiFiApi() }
     private val originRoute: BridgeRoute? get() = bridgeRoutes.firstOrNull { it.chain == chain }
 
+    private val ccipLane: CcipTestnet.Lane? get() = if (ccipTestnet) CcipTestnet.laneOf(chain) else null
+
     override val supportsBridge: Boolean
-        get() = if (relayTestnet) RelayTestnet.chainIdOf(chain) != null else originRoute != null && bridgeRoutes.size > 1
+        get() = if (relayTestnet || ccipTestnet) {
+            (relayTestnet && RelayTestnet.chainIdOf(chain) != null) || ccipLane != null
+        } else originRoute != null && bridgeRoutes.size > 1
 
     override fun bridgeDestinations(): List<Chain> = when {
-        relayTestnet -> RelayTestnet.destinations(chain)
+        relayTestnet || ccipTestnet ->
+            ((if (relayTestnet) RelayTestnet.destinations(chain) else emptyList()) +
+                (if (ccipTestnet) CcipTestnet.destinations(chain) else emptyList())).distinct()
         supportsBridge -> bridgeRoutes.map { it.chain }.filter { it != chain }
         else -> emptyList()
+    }
+
+    // ---- Chainlink CCIP (testnet): CCIP-BnM between Sepolia and BNB testnet, called on the Router directly ----
+
+    /** The Router's fee for this exact transfer, in the native coin. A Router refuses an unsupported token or lane here. */
+    private fun ccipFee(lane: CcipTestnet.Lane, dest: CcipTestnet.Lane, user: String, raw: BigInteger): BigInteger {
+        val data = CcipAbi.getFee(dest.selector, user, lane.bnm, raw)
+        val res = web3.ethCall(Transaction.createEthCallTransaction(user, lane.router, data), DefaultBlockParameterName.LATEST).send()
+        if (res.hasError()) throw IllegalStateException("The CCIP router refused this transfer: ${res.error.message.orEmpty().take(160)}")
+        val fee = CcipAbi.feeFromResult(res.value)
+        CcipGuard.validateFee(fee)?.let { throw IllegalStateException(it) }
+        return fee!!
+    }
+
+    private fun quoteCcip(user: String, from: SwapAsset, dest: Chain, raw: BigInteger): BridgeQuote {
+        val lane = ccipLane
+        val destLane = CcipTestnet.laneOf(dest)
+        CcipGuard.validateRequest(lane, destLane, from.id, raw)?.let { throw IllegalStateException(it) }
+        lane!!; destLane!!
+        val fee = ccipFee(lane, destLane, user, raw)
+        val needsApproval = allowance(lane.bnm, user, lane.router) < raw
+        // CCIP-BnM is burned here and minted there one for one; the fee is paid separately in the native coin.
+        return BridgeQuote(
+            chain, dest, from, raw, raw, BigInteger.ZERO, CcipTestnet.BNM_DECIMALS, CcipTestnet.BNM_SYMBOL, 0L, needsApproval,
+            networkFeeRaw = fee, networkFeeSymbol = chain.symbol
+        )
+    }
+
+    private fun executeCcip(seed: ByteArray, quote: BridgeQuote): SwapResult {
+        val lane = ccipLane
+        val destLane = CcipTestnet.laneOf(quote.destChain)
+        val raw = quote.amountInRaw
+        CcipGuard.validateRequest(lane, destLane, quote.from.id, raw)?.let { throw IllegalStateException(it) }
+        lane!!; destLane!!
+        val creds = credentials(seed)
+        val user = creds.address
+        val txManager = RawTransactionManager(web3, creds, chainId)
+
+        // Exact-amount approval to the Router (never unlimited).
+        val approvals = ArrayList<String>()
+        val current = allowance(lane.bnm, user, lane.router)
+        if (current < raw) {
+            if (current.signum() > 0) approvals.add(sendApproval(txManager, user, lane.bnm, lane.router, BigInteger.ZERO))
+            approvals.add(sendApproval(txManager, user, lane.bnm, lane.router, raw))
+        }
+
+        // Read the fee after the approval confirmed, so it is current; refuse if it moved a lot since the user saw it.
+        val fee = ccipFee(lane, destLane, user, raw)
+        check(CcipGuard.freshFeeAcceptable(quote.networkFeeRaw, fee)) { "The CCIP fee changed. Please request a new quote." }
+
+        // eth_estimateGas inside sendCall fails closed if the Router would reject this call.
+        val hash = sendCall(txManager, user, lane.router, fee, CcipAbi.ccipSend(destLane.selector, user, lane.bnm, raw))
+        return SwapResult(approvals, hash, "ccip:$hash")
+    }
+
+    override val faucetTokenSymbol: String? get() = ccipLane?.let { CcipTestnet.BNM_SYMBOL }
+
+    /** CCIP-BnM's public faucet: drip(address) mints a small amount to the caller. */
+    override suspend fun requestFaucetToken(seed: ByteArray): String = withContext(Dispatchers.IO) {
+        val lane = ccipLane ?: throw UnsupportedOperationException("No test-token faucet on this network")
+        val creds = credentials(seed)
+        val txManager = RawTransactionManager(web3, creds, chainId)
+        sendCall(txManager, creds.address, lane.bnm, BigInteger.ZERO, CcipAbi.drip(creds.address))
     }
 
     private val relay: RelayApi by lazy { RelayApi() }
@@ -369,8 +440,11 @@ class EthereumProvider(
     override suspend fun quoteBridge(
         userAddress: String, from: SwapAsset, dest: Chain, amount: BigDecimal
     ): BridgeQuote = withContext(Dispatchers.IO) {
-        if (relayTestnet) {
-            if (from.id != null) throw IllegalStateException(RelayGuard.TOKENS_UNSUPPORTED)
+        if (relayTestnet || ccipTestnet) {
+            if (ccipLane != null && from.id != null && CcipTestnet.laneOf(dest) != null) {
+                return@withContext quoteCcip(userAddress, from, dest, rawAmount(amount, from.decimals))
+            }
+            if (!relayTestnet || from.id != null || RelayTestnet.chainIdOf(dest) == null) throw IllegalStateException(TestnetRoutes.UNSUPPORTED)
             val rawEth = rawAmount(amount, from.decimals)
             val rq = freshRelayQuote(userAddress, dest, rawEth)
             return@withContext BridgeQuote(
@@ -390,8 +464,11 @@ class EthereumProvider(
     }
 
     override suspend fun executeBridge(seed: ByteArray, quote: BridgeQuote): SwapResult = withContext(Dispatchers.IO) {
-        if (relayTestnet) {
-            if (quote.from.id != null) throw IllegalStateException(RelayGuard.TOKENS_UNSUPPORTED)
+        if (relayTestnet || ccipTestnet) {
+            if (ccipLane != null && quote.from.id != null && CcipTestnet.laneOf(quote.destChain) != null) {
+                return@withContext executeCcip(seed, quote)
+            }
+            if (!relayTestnet || quote.from.id != null || RelayTestnet.chainIdOf(quote.destChain) == null) throw IllegalStateException(TestnetRoutes.UNSUPPORTED)
             val rcreds = credentials(seed)
             val ruser = rcreds.address
             val rtx = RawTransactionManager(web3, rcreds, chainId)
@@ -430,7 +507,12 @@ class EthereumProvider(
 
     override suspend fun bridgeFillStatus(depositTxId: String): FillStatus = withContext(Dispatchers.IO) {
         try {
-            if (relayTestnet) relay.status(depositTxId) else lifi.status(depositTxId, chainId.toLong())
+            when {
+                depositTxId.startsWith("ccip:") -> FillStatus.UNKNOWN // CCIP is followed by the destination balance
+                relayTestnet -> relay.status(depositTxId)
+                ccipTestnet -> FillStatus.UNKNOWN
+                else -> lifi.status(depositTxId, chainId.toLong())
+            }
         } catch (e: Exception) { FillStatus.UNKNOWN }
     }
 
@@ -777,7 +859,8 @@ class EthereumProvider(
         val SEPOLIA_TOKENS = listOf(
             TokenInfo("0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", "USDC", 6),
             TokenInfo("0x779877A7B0D9E8603169DdbD7836e478b4624789", "LINK", 18),
-            TokenInfo("0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", "WETH", 18)
+            TokenInfo("0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", "WETH", 18),
+            TokenInfo(CcipTestnet.SEPOLIA.bnm, CcipTestnet.BNM_SYMBOL, CcipTestnet.BNM_DECIMALS)
         )
 
         // Ethereum mainnet. Verify each address on etherscan.io before trusting a balance.

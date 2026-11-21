@@ -42,11 +42,16 @@ class BridgeQuote(
     val decimals: Int,
     val outSymbol: String,
     val etaSeconds: Long,
-    val needsApproval: Boolean
+    val needsApproval: Boolean,
+    /** A separate fee paid in the source chain's native coin on top of the amount (CCIP). Zero when fees come out of the amount. */
+    val networkFeeRaw: BigInteger = BigInteger.ZERO,
+    val networkFeeSymbol: String = ""
 ) {
     val amountIn: BigDecimal get() = BigDecimal(amountInRaw).movePointLeft(decimals)
     val amountOut: BigDecimal get() = BigDecimal(amountOutRaw).movePointLeft(decimals)
     val fee: BigDecimal get() = BigDecimal(feeRaw).movePointLeft(decimals)
+    /** The separate native-coin fee (18 decimals on every EVM chain here), or zero. */
+    val networkFee: BigDecimal get() = BigDecimal(networkFeeRaw).movePointLeft(18)
     val feePercent: Double
         get() = if (amountInRaw.signum() == 0) 0.0
         else BigDecimal(feeRaw).multiply(BigDecimal(100)).divide(BigDecimal(amountInRaw), 2, RoundingMode.HALF_UP).toDouble()

@@ -17,6 +17,7 @@ import com.example.wallet.chain.BridgeSwapStore
 import com.example.wallet.chain.Chain
 import com.example.wallet.chain.JobStage
 import com.example.wallet.chain.RelayTestnet
+import com.example.wallet.chain.TestnetRoutes
 import com.example.wallet.chain.ChainProvider
 import com.example.wallet.chain.BridgeQuote
 import com.example.wallet.chain.SwapAsset
@@ -388,7 +389,7 @@ class WalletViewModel(
 
     /** Assets the bridged funds can arrive as: ETH on the Relay test networks, LI.FI/Across routes on mainnet. */
     private fun bridgeCandidates(from: SwapAsset, chain: Chain, dest: Chain): List<SwapAsset> =
-        if (isTestnet) RelayTestnet.candidateAssets(from, dest)
+        if (isTestnet) TestnetRoutes.candidateAssets(from, chain, dest)
         else BridgeSwapLogic.candidateAssets(from, routeOf(chain), routeOf(dest))
 
     private fun visibleJobs(): List<BridgeSwapJob> = coordinator.jobs().filter { it.testnet == isTestnet }
@@ -525,6 +526,28 @@ class WalletViewModel(
     }
 
     fun cancelBridge() { pendingBridge = null; pendingCombo = null }
+
+    /** Mints the network's free test token (testnets), e.g. CCIP-BnM, so the CCIP bridge can be tried. */
+    fun getFaucetToken(activity: FragmentActivity, chain: Chain) {
+        val provider = providers.first { it.chain == chain }
+        val symbol = provider.faucetTokenSymbol ?: return
+        val s = seed?.copyOf() ?: return
+        viewModelScope.launch(guard) {
+            if (!repo.confirmIdentity(activity, "Get free test $symbol")) {
+                message = "Authentication cancelled. Nothing was sent."
+                s.fill(0)
+                return@launch
+            }
+            sending = true
+            val r = runCatching { provider.requestFaucetToken(s) }
+            s.fill(0)
+            sending = false
+            r.onSuccess {
+                message = "Requested free test $symbol on ${chain.label}. Tx: $it. It shows up after the transaction confirms: tap refresh in a minute."
+                refreshBalances()
+            }.onFailure { message = "Could not get test $symbol: ${it.message}" }
+        }
+    }
 
     fun confirmBridge(activity: FragmentActivity) {
         val q = pendingBridge ?: return

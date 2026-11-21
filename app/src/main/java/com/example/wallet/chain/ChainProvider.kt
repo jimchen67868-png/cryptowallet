@@ -107,6 +107,12 @@ interface ChainProvider {
         throw UnsupportedOperationException("Bridging is not supported on ${chain.label}")
     }
 
+    /** Symbol of a free test token this network can mint to the user (testnets only), or null. */
+    val faucetTokenSymbol: String? get() = null
+
+    /** Mints the free test token to the user. Returns the transaction id. */
+    suspend fun requestFaucetToken(seed: ByteArray): String = throw UnsupportedOperationException("No test-token faucet on this network")
+
     /** Fill status of a bridge deposit made from this network (Across). UNKNOWN if it can't be determined. */
     suspend fun bridgeFillStatus(depositTxId: String): FillStatus = FillStatus.UNKNOWN
 

@@ -87,7 +87,7 @@ fun WalletRoot(vm: WalletViewModel, activity: FragmentActivity) {
                 Screen.ConfirmBackup -> ConfirmBackupScreen(vm, activity)
                 Screen.Import -> ImportScreen(vm, activity)
                 Screen.Locked -> LockedScreen(vm, activity)
-                Screen.Home -> HomeScreen(vm)
+                Screen.Home -> HomeScreen(vm, activity)
                 is Screen.Receive -> ReceiveScreen(vm, s.chain)
                 is Screen.Send -> SendScreen(vm, activity, s.chain, s.token)
                 is Screen.History -> HistoryScreen(vm, s.chain)
@@ -200,7 +200,7 @@ private fun LockedScreen(vm: WalletViewModel, activity: FragmentActivity) {
 }
 
 @Composable
-private fun HomeScreen(vm: WalletViewModel) {
+private fun HomeScreen(vm: WalletViewModel, activity: FragmentActivity) {
     var addTokenFor by remember { mutableStateOf<Chain?>(null) }
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -293,6 +293,9 @@ private fun HomeScreen(vm: WalletViewModel) {
                                     }
                                 }
                             }
+                        }
+                        vm.providers.first { it.chain == acc.chain }.faucetTokenSymbol?.let { symbol ->
+                            TextButton(onClick = { vm.getFaucetToken(activity, acc.chain) }, enabled = !vm.sending) { Text("Get test $symbol") }
                         }
                         if (vm.providers.first { it.chain == acc.chain }.supportsCustomTokens) {
                             TextButton(onClick = { addTokenFor = acc.chain }) { Text("Add token") }
@@ -607,10 +610,11 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
         ) { Text("Get quote") }
         Text(
             if (vm.network == Network.TESTNET) {
-                "TESTNET ONLY. Test ETH moves between Sepolia and Base Sepolia through Relay, a third party. The wallet checks the " +
-                    "deposit transaction (contract, function, your address, exact amount) before signing. But in Relay's design the " +
-                    "transaction only carries an order id: Relay's server, not the transaction, decides where the funds go, so this " +
-                    "route is never offered with real money. Relay limits test transfers to about $1. Only ETH, no tokens."
+                "TESTNET ONLY. Two routes. (1) Test ETH between Sepolia and Base Sepolia through Relay: the wallet checks the deposit " +
+                    "transaction, but Relay's server, not the transaction, decides where the funds go, so it is never offered with real " +
+                    "money; Relay limits test transfers to about $1. (2) The free CCIP-BnM test token between Sepolia and BNB testnet " +
+                    "through Chainlink CCIP: the wallet builds the transaction itself and your address is inside it. Get CCIP-BnM with " +
+                    "\"Get test CCIP-BnM\" on the home screen, and keep some ETH/BNB for the CCIP fee."
             } else {
                 "Your funds move between blockchains through LI.FI, routed over Across: both are third parties. It takes minutes and " +
                     "cannot be undone. The transaction comes from LI.FI, so the wallet decodes it and refuses to sign unless the " +
@@ -631,6 +635,7 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
                     "Send ${q.amountIn.plain()} $symbol on ${q.chain.label} to ${q.destChain.label}\n\n" +
                         "You receive about ${q.amountOut.plain()} ${q.outSymbol} on ${q.destChain.label}\n" +
                         "Bridge fee: ${q.fee.plain()} $symbol (${q.feePercent}%)\n" +
+                        (if (q.networkFeeRaw.signum() > 0) "Network fee, paid in ${q.networkFeeSymbol} on top: ${q.networkFee.plain()} ${q.networkFeeSymbol}\n" else "") +
                         "Estimated time: ${etaText(q.etaSeconds)}\n" +
                         (if (q.needsApproval) "\nFirst needs a token approval for exactly this amount, so 2 transactions.\n" else "") +
                         (vm.pendingCombo?.let { c ->
@@ -639,8 +644,12 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
                                 "That is a second step with a fresh quote and its own fingerprint/PIN prompt. " +
                                 "Arrival is only watched while the app is open and unlocked; if the funds land first they simply wait on ${q.destChain.label}.\n"
                         } ?: "") +
-                        (if (vm.network == Network.TESTNET) "\nTestnet only: Relay decides the recipient, not the transaction.\n" else "") +
-                        "\nIf the transfer is not filled in time, it is refunded to you on ${q.chain.label}. This cannot be undone."
+                        (if (vm.network == Network.TESTNET) {
+                            if (q.networkFeeRaw.signum() > 0) "\nTestnet only. Sent through Chainlink CCIP: your address is inside the transaction itself.\n"
+                            else "\nTestnet only: Relay decides the recipient, not the transaction.\n"
+                        } else "") +
+                        (if (q.networkFeeRaw.signum() > 0) "\nCCIP delivery can take many minutes. This cannot be undone."
+                        else "\nIf the transfer is not filled in time, it is refunded to you on ${q.chain.label}. This cannot be undone.")
                 )
             },
             confirmButton = { TextButton(onClick = { vm.confirmBridge(activity) }) { Text("Bridge") } },
