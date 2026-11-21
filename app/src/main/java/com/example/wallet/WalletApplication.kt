@@ -72,7 +72,10 @@ class AppContainer(context: Context) {
 
     private val testnetProviders: List<ChainProvider> by lazy {
         listOf(
-            EthereumProvider(testnetTokens, uniswap = UniswapDeployments.SEPOLIA, uniswapV2 = UniswapV2Deployments.SEPOLIA, relayTestnet = true, ccipTestnet = true), BitcoinProvider(), SolanaProvider(),
+            EthereumProvider(testnetTokens, uniswap = UniswapDeployments.SEPOLIA, uniswapV2 = UniswapV2Deployments.SEPOLIA, relayTestnet = true, ccipTestnet = true,
+            // CCIP-BnM is a free test token with no market price, so it is added here and not to the priced SEPOLIA_TOKENS list.
+            knownTokens = EthereumProvider.SEPOLIA_TOKENS +
+                com.example.wallet.data.TokenInfo(CcipTestnet.SEPOLIA.bnm, CcipTestnet.BNM_SYMBOL, CcipTestnet.BNM_DECIMALS)), BitcoinProvider(), SolanaProvider(),
             evm(Chain.BASE, "https://base-sepolia-rpc.publicnode.com", 84532L, testnetTokens, true,
                 "Sepolia testnet", emptyList(), "https://base-sepolia.blockscout.com/api/v2", "https://sepolia.basescan.org/tx/", uniswap = UniswapDeployments.BASE_SEPOLIA, relayTestnet = true),
             evm(Chain.ARB, "https://arbitrum-sepolia-rpc.publicnode.com", 421614L, testnetTokens, true,
