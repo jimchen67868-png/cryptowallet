@@ -17,6 +17,18 @@ object SunSwapV2 {
     const val FACTORY = "TKWJdrQkqHisa1X8HUdHEfREvTzw4pMAaY"
     const val WTRX = "TNUC9Qb1rRpS5CbWLmNMxXBjyFoydXjWFR"
 
+    // Nile testnet. The sources disagree about which V2 router is current there, so both are probed on chain and the first
+    // one that answers WETH()/factory() and has a pool for the pair is used (WTRX and factory are discovered, not pinned).
+    const val NILE_ROUTER_A = "TMn1qrmYUMSTXo9babrJLzepKZoPC7M6Sy"   // sun-protocol/sunswap-v2-contracts deployment list
+    const val NILE_ROUTER_B = "TYMjxCXfqLpMWW1QToP6hbcjpion7EE25p"   // docs.sun.io list as used by TronLink's tooling
+    const val NILE_USDT = "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf"       // the faucet's test USDT
+
+    /** Routers to try, and what a router must report about itself (null = accept what it reports: testnet only). */
+    class Config(val routers: List<String>, val wtrx: String?, val factory: String?)
+
+    val MAINNET = Config(listOf(ROUTER), WTRX, FACTORY)
+    val NILE = Config(listOf(NILE_ROUTER_A, NILE_ROUTER_B), null, null)
+
     const val SLIPPAGE_BPS = 100            // 1%: minimum output below the quote
     const val MAX_IMPACT_BPS = 300L         // refuse trades that move the pool price more than 3%
     const val DEADLINE_SECONDS = 300L
@@ -39,12 +51,12 @@ object SunSwapV2 {
     private const val SEL_APPROVE = "095ea7b3"
 
     /** Router path in Base58 contract addresses: native TRX is WTRX; token to token goes through WTRX. */
-    fun path(fromId: String?, toId: String?): List<String> {
+    fun path(fromId: String?, toId: String?, wtrx: String = WTRX): List<String> {
         require(fromId != toId) { "Pick two different assets" }
         return when {
-            fromId == null -> listOf(WTRX, toId!!)
-            toId == null -> listOf(fromId, WTRX)
-            else -> listOf(fromId, WTRX, toId)
+            fromId == null -> listOf(wtrx, toId!!)
+            toId == null -> listOf(fromId, wtrx)
+            else -> listOf(fromId, wtrx, toId)
         }
     }
 

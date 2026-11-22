@@ -111,7 +111,7 @@ class TronSwapTest {
         assertTrue(SunSwapV2.impactBps(big(100_000_000), big(23_750_000), big(1_000_000), big(250_000)) > SunSwapV2.MAX_IMPACT_BPS)
     }
 
-    @Test fun providerOffersSwaps_onMainnetOnly() {
+    @Test fun providerOffersSwaps_onMainnetAndNile() {
         val m = TronProvider.mainnet()
         assertTrue(m.supportsSwap)
         assertEquals(listOf("TRX", "USDT"), m.swapAssets().map { it.symbol })
@@ -119,9 +119,34 @@ class TronSwapTest {
         assertEquals(listOf(6, 6), m.swapAssets().map { it.decimals })
         assertTrue(m.swapAssets().all { it.curated })
         val nile = TronProvider()
-        assertFalse(nile.supportsSwap)
-        assertTrue(nile.swapAssets().isEmpty())
+        assertTrue(nile.isTestnet)
+        assertTrue(nile.supportsSwap)
+        assertEquals(listOf<String?>(null, SunSwapV2.NILE_USDT), nile.swapAssets().map { it.id })
         assertNotNull(m.swapProviderName)
         assertEquals(1, SunSwapV2.SLIPPAGE_BPS / 100)
+    }
+
+    @Test fun mainnetPinsTheRouterIdentity_nileDiscoversIt() {
+        assertEquals(listOf(SunSwapV2.ROUTER), SunSwapV2.MAINNET.routers)
+        assertEquals(SunSwapV2.WTRX, SunSwapV2.MAINNET.wtrx)
+        assertEquals(SunSwapV2.FACTORY, SunSwapV2.MAINNET.factory)
+        assertEquals(2, SunSwapV2.NILE.routers.size)
+        assertEquals(null, SunSwapV2.NILE.wtrx)   // testnet: the router's own WETH()/factory() are used
+        assertEquals(null, SunSwapV2.NILE.factory)
+    }
+
+    @Test fun nileAddresses_areValidBase58Check() {
+        for (a in SunSwapV2.NILE.routers + SunSwapV2.NILE_USDT) assertNotNull(a, TronAddress.decode(a))
+        assertEquals(
+            "listed as the USDT of Nile in several independent references",
+            "TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf", SunSwapV2.NILE_USDT
+        )
+        assertTrue(TronProvider.NILE_TOKENS.single().address == SunSwapV2.NILE_USDT)
+    }
+
+    @Test fun path_usesTheRoutersOwnWtrx() {
+        val discovered = "TYsbWxNnyTgsZaTFaue9hqpxkU3Fkco94a"
+        assertEquals(listOf(discovered, SunSwapV2.NILE_USDT), SunSwapV2.path(null, SunSwapV2.NILE_USDT, discovered))
+        assertEquals(listOf(SunSwapV2.NILE_USDT, discovered), SunSwapV2.path(SunSwapV2.NILE_USDT, null, discovered))
     }
 }

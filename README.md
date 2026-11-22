@@ -223,6 +223,11 @@ factory). Router/factory/WTRX addresses come from SunSwap's V2 documentation and
   balance beyond the amount (the quote shows the estimate and refuses if the balance can't cover it).
 - Only pairs of TRX and the built-in token list (USDT) are offered. More tokens need verified contract addresses first.
 - Only V2 pools are used (not SunSwap V3 / the Smart Router): liquidity may be thinner or pricier than the best route.
+**Testnet (Nile):** the same swap works on Nile with the faucet's test USDT (`TXYZop...`, get it and TRX at nileex.io). Sources disagree
+about which SunSwap V2 router is current on Nile, so the wallet probes both candidates on chain and uses the first that answers
+`WETH()`/`factory()` and has a pool for the pair (WTRX and factory are discovered there, pinned only on mainnet). **Whether a TRX/USDT
+V2 pool with liquidity exists on Nile is not known**: TronLink's tooling notes that TRX→USDT on Nile is routed through non-V2 pools.
+If there is none, the quote says "No usable SunSwap V2 pool found" and lists what each router answered; paste that to me.
 **Litecoin has no tokens or exchange on its own network**, so there is nothing to swap "within" Litecoin; LTC swaps are the THORChain
 cross-chain ones above.
 Verified here: selectors (keccak) and calldata against an independent Python encoder. **Not run live.**

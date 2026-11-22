@@ -27,11 +27,11 @@ class TronProvider(
     private val apiBase: String = "https://nile.trongrid.io",
     override val isTestnet: Boolean = true,
     private val explorerTxUrl: String = "https://nile.tronscan.org/#/transaction/",
-    private val knownTokens: List<TokenInfo> = emptyList(),
+    private val knownTokens: List<TokenInfo> = NILE_TOKENS,
     /** THORChain swaps (mainnet only). */
     private val thor: ThorSwaps? = null,
-    /** SunSwap V2 swaps between TRX and the tokens in [knownTokens] (mainnet only). */
-    private val sunSwap: Boolean = false
+    /** SunSwap V2 swaps between TRX and the tokens in [knownTokens]. */
+    private val swapConfig: SunSwapV2.Config? = SunSwapV2.NILE
 ) : ChainProvider {
 
     override val chain = Chain.TRX
@@ -264,15 +264,16 @@ class TronProvider(
         }
 
 
-    // ---- swaps on Tron: SunSwap V2 (mainnet) ----
+    // ---- swaps on Tron: SunSwap V2 (mainnet and Nile testnet) ----
 
-    override val supportsSwap: Boolean get() = sunSwap
+    override val supportsSwap: Boolean get() = swapConfig != null
     override val swapProviderName: String get() = "SunSwap V2 (calls built in the wallet and checked on chain)"
 
     override fun swapAssets(): List<SwapAsset> =
-        if (!sunSwap) emptyList() else listOf(SwapAsset(null, "TRX", 6)) + knownTokens.map { SwapAsset(it.address, it.symbol, it.decimals) }
+        if (swapConfig == null) emptyList() else listOf(SwapAsset(null, "TRX", 6)) + knownTokens.map { SwapAsset(it.address, it.symbol, it.decimals) }
 
-    private var routerVerified = false
+    /** Routers already checked on chain in this session: router -> its WTRX. */
+    private val checkedRouters = HashMap<String, String>()
 
     /** A read-only call. Throws if the node says it would fail or revert. */
     private fun constantCall(owner: String, contract: String, signature: String, parameterHex: String, callValueSun: Long = 0L): JSONObject {
@@ -295,23 +296,29 @@ class TronProvider(
     private fun firstResult(j: JSONObject): String =
         j.optJSONArray("constant_result")?.optString(0)?.takeIf { it.isNotEmpty() } ?: throw IllegalStateException("Empty response from the node")
 
-    /** The router must really be SunSwap's V2 router (WETH() = WTRX, factory() = factory) before TRX is sent to it. */
-    private fun verifyRouter(me: String) {
-        if (routerVerified) return
-        val weth = SunSwapV2.parseAddressWord(firstResult(constantCall(me, SunSwapV2.ROUTER, "WETH()", "")))
-        val factory = SunSwapV2.parseAddressWord(firstResult(constantCall(me, SunSwapV2.ROUTER, "factory()", "")))
-        val wtrx = TronAddress.decode(SunSwapV2.WTRX)!!.copyOfRange(1, 21)
-        val fac = TronAddress.decode(SunSwapV2.FACTORY)!!.copyOfRange(1, 21)
-        check(weth == TronTx.toHex(wtrx) && factory == TronTx.toHex(fac)) { "The SunSwap router did not check out. Nothing was sent." }
-        routerVerified = true
+    private fun addressFromWord(hexWord: String): String =
+        TronAddress.toBase58(byteArrayOf(TronAddress.PREFIX) + TronTx.fromHex(SunSwapV2.parseAddressWord(hexWord)))
+
+    /**
+     * Asks the router who it is (WETH() = wrapped TRX, factory()). On mainnet both must equal the pinned addresses, so TRX is
+     * never sent to a contract that isn't SunSwap's V2 router; on the testnet they are discovered. Returns the router's WTRX.
+     */
+    private fun checkRouter(me: String, router: String, cfg: SunSwapV2.Config): String {
+        checkedRouters[router]?.let { return it }
+        val wtrx = addressFromWord(firstResult(constantCall(me, router, "WETH()", "")))
+        val factory = addressFromWord(firstResult(constantCall(me, router, "factory()", "")))
+        if (cfg.wtrx != null && cfg.wtrx != wtrx) throw IllegalStateException("The SunSwap router did not check out (WTRX). Nothing was sent.")
+        if (cfg.factory != null && cfg.factory != factory) throw IllegalStateException("The SunSwap router did not check out (factory). Nothing was sent.")
+        checkedRouters[router] = wtrx
+        return wtrx
     }
 
     private fun pathBytes(path: List<String>): List<ByteArray> =
         path.map { TronAddress.decode(it) ?: throw IllegalStateException("Bad contract address") }
 
-    private fun amountsOut(me: String, amountIn: BigInteger, path: List<String>): BigInteger {
+    private fun amountsOut(me: String, router: String, amountIn: BigInteger, path: List<String>): BigInteger {
         val j = try {
-            constantCall(me, SunSwapV2.ROUTER, SunSwapV2.SIG_GET_AMOUNTS_OUT, SunSwapV2.getAmountsOutParam(amountIn, pathBytes(path)))
+            constantCall(me, router, SunSwapV2.SIG_GET_AMOUNTS_OUT, SunSwapV2.getAmountsOutParam(amountIn, pathBytes(path)))
         } catch (e: IllegalStateException) {
             throw IllegalStateException("No SunSwap V2 pool with enough liquidity for this pair")
         }
@@ -320,15 +327,34 @@ class TronProvider(
         return out
     }
 
-    private fun allowance(me: String, token: String): BigInteger {
+    /** The router that will be used for a trade, its wrapped-TRX address, the path and the current quote. */
+    private class SwapRoute(val router: String, val path: List<String>, val out: BigInteger)
+
+    /** First configured router that checks out and has a pool for this pair. Throws with the reasons if none does. */
+    private fun resolveRoute(me: String, from: SwapAsset, to: SwapAsset, raw: BigInteger): SwapRoute {
+        val cfg = swapConfig ?: throw IllegalStateException("Swaps are not available on this network")
+        val notes = ArrayList<String>()
+        for (router in cfg.routers) {
+            try {
+                val wtrx = checkRouter(me, router, cfg)
+                val path = SunSwapV2.path(from.id, to.id, wtrx)
+                return SwapRoute(router, path, amountsOut(me, router, raw, path))
+            } catch (e: IllegalStateException) {
+                notes.add(if (cfg.routers.size == 1) e.message.orEmpty() else "router ${router.take(6)}…${router.takeLast(3)}: ${e.message}")
+            }
+        }
+        throw IllegalStateException(if (notes.size == 1) notes[0] else "No usable SunSwap V2 pool found. " + notes.joinToString("; "))
+    }
+
+    private fun allowance(me: String, token: String, router: String): BigInteger {
         val owner = TronAddress.decode(me)!!
-        val router = TronAddress.decode(SunSwapV2.ROUTER)!!
-        return SunSwapV2.parseUint(firstResult(constantCall(me, token, SunSwapV2.SIG_ALLOWANCE, SunSwapV2.allowanceParam(owner, router))))
+        val spender = TronAddress.decode(router)!!
+        return SunSwapV2.parseUint(firstResult(constantCall(me, token, SunSwapV2.SIG_ALLOWANCE, SunSwapV2.allowanceParam(owner, spender))))
     }
 
     private fun checkSwapAssets(from: SwapAsset, to: SwapAsset) {
         val ok = swapAssets().associate { it.id to it.decimals }
-        check(sunSwap && ok[from.id] == from.decimals && ok[to.id] == to.decimals) { "This pair can't be swapped here" }
+        check(swapConfig != null && ok[from.id] == from.decimals && ok[to.id] == to.decimals) { "This pair can't be swapped here" }
         require(from.id != to.id) { "Pick two different assets" }
     }
 
@@ -336,13 +362,12 @@ class TronProvider(
         withContext(Dispatchers.IO) {
             checkSwapAssets(from, to)
             val raw = toRaw(amount, from.decimals)
-            verifyRouter(userAddress)
-            val path = SunSwapV2.path(from.id, to.id)
-            val out = amountsOut(userAddress, raw, path)
+            val route = resolveRoute(userAddress, from, to, raw)
+            val out = route.out
 
             // Price impact: compare with the price of a tiny trade through the same pool.
             val probeIn = raw.min(BigInteger.TEN.pow(from.decimals))
-            val impact = if (probeIn == raw) 0L else SunSwapV2.impactBps(raw, out, probeIn, amountsOut(userAddress, probeIn, path))
+            val impact = if (probeIn == raw) 0L else SunSwapV2.impactBps(raw, out, probeIn, amountsOut(userAddress, route.router, probeIn, route.path))
             if (impact > SunSwapV2.MAX_IMPACT_BPS) {
                 throw IllegalStateException("This trade would move the SunSwap pool price by ${impact / 100.0}%. Try a smaller amount.")
             }
@@ -353,18 +378,19 @@ class TronProvider(
             val balance = TronParse.trxBalanceSun(account(userAddress))
             var needsApproval = false
             var txCount = 1
-            var energy: Long
+            val energy: Long
+            val minOut = SwapGuard.minOut(out, SunSwapV2.SLIPPAGE_BPS)
             if (from.id != null) {
-                val have = allowance(userAddress, from.id)
+                val have = allowance(userAddress, from.id, route.router)
                 if (have < raw) {
                     needsApproval = true
                     txCount = if (have.signum() > 0) 3 else 2 // some tokens (USDT) require resetting a non-zero allowance first
                     energy = SunSwapV2.FALLBACK_SWAP_ENERGY + SunSwapV2.FALLBACK_APPROVE_ENERGY * (txCount - 1)
                 } else {
-                    energy = simulateSwap(userAddress, from, to, raw, SwapGuard.minOut(out, SunSwapV2.SLIPPAGE_BPS), path)
+                    energy = simulateSwap(userAddress, route.router, from, to, raw, minOut, route.path)
                 }
             } else {
-                energy = simulateSwap(userAddress, from, to, raw, SwapGuard.minOut(out, SunSwapV2.SLIPPAGE_BPS), path)
+                energy = simulateSwap(userAddress, route.router, from, to, raw, minOut, route.path)
             }
             val energySun = TronFee.energySun(energy, res.energy, p.energySun)
             val bandwidthSun = TronFee.bandwidthSun(600 * txCount, res.bandwidth, p.bandwidthSun)
@@ -380,9 +406,9 @@ class TronProvider(
         }
 
     /** Energy the swap would use right now (read-only simulation of the exact call). Throws if it would revert. */
-    private fun simulateSwap(me: String, from: SwapAsset, to: SwapAsset, raw: BigInteger, minOut: BigInteger, path: List<String>): Long {
+    private fun simulateSwap(me: String, router: String, from: SwapAsset, to: SwapAsset, raw: BigInteger, minOut: BigInteger, path: List<String>): Long {
         val call = SunSwapV2.swapCall(from.id, to.id, raw, minOut, TronAddress.decode(me)!!, System.currentTimeMillis() / 1000 + SunSwapV2.DEADLINE_SECONDS, pathBytes(path))
-        val j = constantCall(me, SunSwapV2.ROUTER, call.signature, call.param, call.callValueSun)
+        val j = constantCall(me, router, call.signature, call.param, call.callValueSun)
         val energy = j.optLong("energy_used", 0L)
         if (energy <= 0L) throw IllegalStateException("Could not estimate the energy for this swap")
         return energy
@@ -397,26 +423,24 @@ class TronProvider(
         val from = quote.from
         val to = quote.to
         val raw = quote.amountInRaw
-        verifyRouter(me)
-        val pathIds = SunSwapV2.path(from.id, to.id)
         val minOut = SwapGuard.minOut(quote.expectedOutRaw, quote.slippageBps)
 
         // The price may have moved since the quote: the minimum is fixed by the quote the user saw.
-        val now = amountsOut(me, raw, pathIds)
-        if (now < minOut) throw IllegalStateException("The price moved more than ${quote.slippageBps / 100.0}% since the quote. Nothing was sent. Get a new quote.")
+        val route = resolveRoute(me, from, to, raw)
+        if (route.out < minOut) throw IllegalStateException("The price moved more than ${quote.slippageBps / 100.0}% since the quote. Nothing was sent. Get a new quote.")
 
         val approvals = ArrayList<String>()
         if (from.id != null) {
-            var have = allowance(me, from.id)
+            var have = allowance(me, from.id, route.router)
             if (have < raw) {
-                if (have.signum() > 0) approvals.add(approve(kp, owner, me, from.id, BigInteger.ZERO)) // reset first (USDT rule)
-                approvals.add(approve(kp, owner, me, from.id, raw))                                    // exactly this amount, never unlimited
-                have = allowance(me, from.id)
+                if (have.signum() > 0) approvals.add(approve(kp, owner, me, from.id, route.router, BigInteger.ZERO)) // reset first (USDT rule)
+                approvals.add(approve(kp, owner, me, from.id, route.router, raw))                                    // exactly this amount, never unlimited
+                have = allowance(me, from.id, route.router)
                 check(have >= raw) { "The approval is not visible on chain yet. Nothing was swapped: try again in a minute." }
             }
         }
 
-        val energyUsed = simulateSwap(me, from, to, raw, minOut, pathIds)
+        val energyUsed = simulateSwap(me, route.router, from, to, raw, minOut, route.path)
         val p = chainParams()
         val res = resources(me)
         val energySun = TronFee.energySun(energyUsed, res.energy, p.energySun)
@@ -425,29 +449,27 @@ class TronProvider(
         if (balance < inSun + energySun) throw IllegalStateException("Not enough TRX for the network fee (about ${TronFee.sunToTrx(energySun).toPlainString()} TRX). Nothing was swapped.")
 
         val deadline = System.currentTimeMillis() / 1000 + SunSwapV2.DEADLINE_SECONDS
-        val call = SunSwapV2.swapCall(from.id, to.id, raw, minOut, owner, deadline, pathBytes(pathIds))
-        val data = TronTx.fromHex(selectorOf(call)) + TronTx.fromHex(call.param)
-        val router = TronAddress.decode(SunSwapV2.ROUTER)!!
+        val call = SunSwapV2.swapCall(from.id, to.id, raw, minOut, owner, deadline, pathBytes(route.path))
+        val data = TronTx.fromHex(call.selector) + TronTx.fromHex(call.param)
+        val routerBytes = TronAddress.decode(route.router) ?: throw IllegalStateException("Bad router address")
         val ref = latestBlock()
-        val rawData = TronTx.triggerRaw(ref.bytes, ref.hash, ref.expirationMs, ref.timestampMs, owner, router, data, TronFee.feeLimit(energySun), call.callValueSun)
+        val rawData = TronTx.triggerRaw(ref.bytes, ref.hash, ref.expirationMs, ref.timestampMs, owner, routerBytes, data, TronFee.feeLimit(energySun), call.callValueSun)
         val txid = broadcast(kp, rawData)
         SwapResult(approvals, txid)
     }
 
-    private fun selectorOf(call: SunSwapV2.Call): String = call.selector
-
     /** Sends `approve(router, amount)`, waits until it is confirmed on chain, returns its id. */
-    private suspend fun approve(kp: org.web3j.crypto.ECKeyPair, owner: ByteArray, me: String, token: String, amount: BigInteger): String {
+    private suspend fun approve(kp: org.web3j.crypto.ECKeyPair, owner: ByteArray, me: String, token: String, router: String, amount: BigInteger): String {
         val contract = TronAddress.decode(token) ?: throw IllegalStateException("Bad token contract")
-        val router = TronAddress.decode(SunSwapV2.ROUTER)!!
-        val sim = constantCall(me, token, SunSwapV2.SIG_APPROVE, SunSwapV2.approveParam(router, amount))
+        val spender = TronAddress.decode(router) ?: throw IllegalStateException("Bad router address")
+        val sim = constantCall(me, token, SunSwapV2.SIG_APPROVE, SunSwapV2.approveParam(spender, amount))
         val energy = maxOf(sim.optLong("energy_used", 0L), SunSwapV2.FALLBACK_APPROVE_ENERGY / 2)
         val p = chainParams()
         val res = resources(me)
         val energySun = TronFee.energySun(energy, res.energy, p.energySun)
         val ref = latestBlock()
         val raw = TronTx.triggerRaw(ref.bytes, ref.hash, ref.expirationMs, ref.timestampMs, owner, contract,
-            SunSwapV2.approveData(router, amount), TronFee.feeLimit(energySun))
+            SunSwapV2.approveData(spender, amount), TronFee.feeLimit(energySun))
         val id = broadcast(kp, raw)
         waitForSuccess(id)
         return id
@@ -523,9 +545,12 @@ class TronProvider(
         const val USDT_MAINNET = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
         val MAINNET_TOKENS = listOf(TokenInfo(USDT_MAINNET, "USDT", 6))
 
+        /** Nile testnet: the USDT that the Nile faucet (nileex.io) hands out. */
+        val NILE_TOKENS = listOf(TokenInfo(SunSwapV2.NILE_USDT, "USDT", 6))
+
         fun mainnet() = TronProvider(
             apiBase = "https://api.trongrid.io", isTestnet = false,
-            explorerTxUrl = "https://tronscan.org/#/transaction/", knownTokens = MAINNET_TOKENS, thor = ThorSwaps(), sunSwap = true
+            explorerTxUrl = "https://tronscan.org/#/transaction/", knownTokens = MAINNET_TOKENS, thor = ThorSwaps(), swapConfig = SunSwapV2.MAINNET
         )
     }
 }
