@@ -132,3 +132,49 @@ raw_memo = ld(0x0a, bytes.fromhex("2927")) + ld(0x22, bytes.fromhex("939ece39d08
     + ld(0x52, memo) + ld(0x5a, contract_) + vi(0x70, 1777447470038)
 print("transfer raw_data with memo:", raw_memo.hex())
 print("memo txID:", sha256(raw_memo).hex())
+
+# ---------- SunSwap V2 (Uniswap V2 ABI): selectors and calldata ----------
+def sel(sig): return keccak256(sig.encode())[:4]
+SIGS = {
+    "getAmountsOut": "getAmountsOut(uint256,address[])",
+    "swapExactETHForTokens": "swapExactETHForTokens(uint256,address[],address,uint256)",
+    "swapExactTokensForETH": "swapExactTokensForETH(uint256,uint256,address[],address,uint256)",
+    "swapExactTokensForTokens": "swapExactTokensForTokens(uint256,uint256,address[],address,uint256)",
+    "approve": "approve(address,uint256)", "allowance": "allowance(address,address)",
+    "WETH": "WETH()", "factory": "factory()",
+}
+for k, v in SIGS.items(): print("selector", k, sel(v).hex())
+assert sel(SIGS["swapExactETHForTokens"]).hex() == "7ff36ab5"   # the well-known Uniswap V2 selectors
+assert sel(SIGS["swapExactTokensForETH"]).hex() == "18cbafe5"
+assert sel(SIGS["swapExactTokensForTokens"]).hex() == "38ed1739"
+assert sel(SIGS["getAmountsOut"]).hex() == "d06ca61f"
+assert sel(SIGS["approve"]).hex() == "095ea7b3"
+
+def w(n): return n.to_bytes(32, 'big')
+def aw(a21): return b'\x00' * 12 + a21[1:]
+WTRX = b58dec("TNUC9Qb1rRpS5CbWLmNMxXBjyFoydXjWFR")[:21]
+USDT = b58dec("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t")[:21]
+ROUTER = b58dec("TKzxdSv2FZKQrEqkKVgp5DcwEXBEKMg2Ax")[:21]
+FACTORY = b58dec("TKWJdrQkqHisa1X8HUdHEfREvTzw4pMAaY")[:21]
+for n, a in [("WTRX", WTRX), ("ROUTER", ROUTER), ("FACTORY", FACTORY)]:
+    d = b58dec(b58check(a)); assert dsha(a)[:4] == b58dec(b58check(a))[21:], n
+    print(n, a.hex())
+def tail(path): return w(len(path)) + b''.join(aw(p) for p in path)
+path_in = [WTRX, USDT]
+path_out = [USDT, WTRX]
+deadline = 1777447800
+d1 = sel(SIGS["getAmountsOut"]) + w(1_000_000) + w(64) + tail(path_in)
+d2 = sel(SIGS["swapExactETHForTokens"]) + w(4_950_000) + w(0x80) + aw(me) + w(deadline) + tail(path_in)
+d3 = sel(SIGS["swapExactTokensForETH"]) + w(5_000_000) + w(4_950_000) + w(0xa0) + aw(me) + w(deadline) + tail(path_out)
+d4 = sel(SIGS["approve"]) + aw(ROUTER) + w(5_000_000)
+print("GETOUT", d1.hex()); print("SWAPTRX", d2.hex()); print("SWAPTOK", d3.hex()); print("APPROVE", d4.hex())
+# trigger raw with call_value (TRX -> USDT swap), fee_limit 50 TRX
+tsc = ld(0x0a, me) + ld(0x12, ROUTER) + vi(0x18, 5_000_000) + ld(0x22, d2)
+any3 = ld(0x0a, b"type.googleapis.com/protocol.TriggerSmartContract") + ld(0x12, tsc)
+c3 = vi(0x08, 31) + ld(0x12, any3)
+raw4 = ld(0x0a, bytes.fromhex("2927")) + ld(0x22, bytes.fromhex("939ece39d08a7abe")) + vi(0x40, 1777447527000) \
+    + ld(0x5a, c3) + vi(0x70, 1777447470038) + bytes([0x90, 0x01]) + varint(50_000_000)
+print("SWAPRAW", raw4.hex()); print("SWAPTXID", sha256(raw4).hex())
+# getAmountsOut result [5_000_000, 1_234_567]
+res = w(32) + w(2) + w(5_000_000) + w(1_234_567)
+print("AMOUNTS", res.hex())

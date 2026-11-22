@@ -3,6 +3,7 @@ package com.example.wallet.chain
 import com.example.wallet.crypto.Hd
 import com.example.wallet.data.TokenInfo
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.math.BigDecimal
@@ -28,7 +29,9 @@ class TronProvider(
     private val explorerTxUrl: String = "https://nile.tronscan.org/#/transaction/",
     private val knownTokens: List<TokenInfo> = emptyList(),
     /** THORChain swaps (mainnet only). */
-    private val thor: ThorSwaps? = null
+    private val thor: ThorSwaps? = null,
+    /** SunSwap V2 swaps between TRX and the tokens in [knownTokens] (mainnet only). */
+    private val sunSwap: Boolean = false
 ) : ChainProvider {
 
     override val chain = Chain.TRX
@@ -169,6 +172,7 @@ class TronProvider(
         )
         val okSim = sim.optJSONObject("result")?.optBoolean("result", false) ?: false
         if (!okSim) throw IllegalStateException("The token transfer would fail: ${TronParse.errorText(sim.optJSONObject("result") ?: sim)}")
+        simRevert(sim)?.let { throw IllegalStateException("The token transfer would fail: $it") }
         val energyUsed = sim.optLong("energy_used", 0L)
         if (energyUsed <= 0L) throw IllegalStateException("Could not estimate the energy for this transfer")
 
@@ -259,6 +263,210 @@ class TronProvider(
             broadcast(kp, rawData)
         }
 
+
+    // ---- swaps on Tron: SunSwap V2 (mainnet) ----
+
+    override val supportsSwap: Boolean get() = sunSwap
+    override val swapProviderName: String get() = "SunSwap V2 (calls built in the wallet and checked on chain)"
+
+    override fun swapAssets(): List<SwapAsset> =
+        if (!sunSwap) emptyList() else listOf(SwapAsset(null, "TRX", 6)) + knownTokens.map { SwapAsset(it.address, it.symbol, it.decimals) }
+
+    private var routerVerified = false
+
+    /** A read-only call. Throws if the node says it would fail or revert. */
+    private fun constantCall(owner: String, contract: String, signature: String, parameterHex: String, callValueSun: Long = 0L): JSONObject {
+        val body = JSONObject().put("owner_address", owner).put("contract_address", contract)
+            .put("function_selector", signature).put("parameter", parameterHex).put("visible", true)
+        if (callValueSun > 0) body.put("call_value", callValueSun)
+        val j = JSONObject(post("/wallet/triggerconstantcontract", body))
+        val ok = j.optJSONObject("result")?.optBoolean("result", false) ?: false
+        if (!ok) throw IllegalStateException(TronParse.errorText(j.optJSONObject("result") ?: j))
+        simRevert(j)?.let { throw IllegalStateException("would fail: $it") }
+        return j
+    }
+
+    /** A simulation can succeed at the API level while the contract reverted. */
+    private fun simRevert(j: JSONObject): String? {
+        val r = j.optJSONObject("transaction")?.optJSONArray("ret")?.optJSONObject(0)?.optString("contractRet", "SUCCESS") ?: "SUCCESS"
+        return if (r == "SUCCESS") null else r
+    }
+
+    private fun firstResult(j: JSONObject): String =
+        j.optJSONArray("constant_result")?.optString(0)?.takeIf { it.isNotEmpty() } ?: throw IllegalStateException("Empty response from the node")
+
+    /** The router must really be SunSwap's V2 router (WETH() = WTRX, factory() = factory) before TRX is sent to it. */
+    private fun verifyRouter(me: String) {
+        if (routerVerified) return
+        val weth = SunSwapV2.parseAddressWord(firstResult(constantCall(me, SunSwapV2.ROUTER, "WETH()", "")))
+        val factory = SunSwapV2.parseAddressWord(firstResult(constantCall(me, SunSwapV2.ROUTER, "factory()", "")))
+        val wtrx = TronAddress.decode(SunSwapV2.WTRX)!!.copyOfRange(1, 21)
+        val fac = TronAddress.decode(SunSwapV2.FACTORY)!!.copyOfRange(1, 21)
+        check(weth == TronTx.toHex(wtrx) && factory == TronTx.toHex(fac)) { "The SunSwap router did not check out. Nothing was sent." }
+        routerVerified = true
+    }
+
+    private fun pathBytes(path: List<String>): List<ByteArray> =
+        path.map { TronAddress.decode(it) ?: throw IllegalStateException("Bad contract address") }
+
+    private fun amountsOut(me: String, amountIn: BigInteger, path: List<String>): BigInteger {
+        val j = try {
+            constantCall(me, SunSwapV2.ROUTER, SunSwapV2.SIG_GET_AMOUNTS_OUT, SunSwapV2.getAmountsOutParam(amountIn, pathBytes(path)))
+        } catch (e: IllegalStateException) {
+            throw IllegalStateException("No SunSwap V2 pool with enough liquidity for this pair")
+        }
+        val out = SunSwapV2.parseAmounts(firstResult(j)).last()
+        if (out.signum() <= 0) throw IllegalStateException("The pool returns nothing for this amount")
+        return out
+    }
+
+    private fun allowance(me: String, token: String): BigInteger {
+        val owner = TronAddress.decode(me)!!
+        val router = TronAddress.decode(SunSwapV2.ROUTER)!!
+        return SunSwapV2.parseUint(firstResult(constantCall(me, token, SunSwapV2.SIG_ALLOWANCE, SunSwapV2.allowanceParam(owner, router))))
+    }
+
+    private fun checkSwapAssets(from: SwapAsset, to: SwapAsset) {
+        val ok = swapAssets().associate { it.id to it.decimals }
+        check(sunSwap && ok[from.id] == from.decimals && ok[to.id] == to.decimals) { "This pair can't be swapped here" }
+        require(from.id != to.id) { "Pick two different assets" }
+    }
+
+    override suspend fun quoteSwap(userAddress: String, from: SwapAsset, to: SwapAsset, amount: BigDecimal): SwapQuote =
+        withContext(Dispatchers.IO) {
+            checkSwapAssets(from, to)
+            val raw = toRaw(amount, from.decimals)
+            verifyRouter(userAddress)
+            val path = SunSwapV2.path(from.id, to.id)
+            val out = amountsOut(userAddress, raw, path)
+
+            // Price impact: compare with the price of a tiny trade through the same pool.
+            val probeIn = raw.min(BigInteger.TEN.pow(from.decimals))
+            val impact = if (probeIn == raw) 0L else SunSwapV2.impactBps(raw, out, probeIn, amountsOut(userAddress, probeIn, path))
+            if (impact > SunSwapV2.MAX_IMPACT_BPS) {
+                throw IllegalStateException("This trade would move the SunSwap pool price by ${impact / 100.0}%. Try a smaller amount.")
+            }
+
+            // Fee estimate (TRX burned for energy and bandwidth).
+            val p = chainParams()
+            val res = resources(userAddress)
+            val balance = TronParse.trxBalanceSun(account(userAddress))
+            var needsApproval = false
+            var txCount = 1
+            var energy: Long
+            if (from.id != null) {
+                val have = allowance(userAddress, from.id)
+                if (have < raw) {
+                    needsApproval = true
+                    txCount = if (have.signum() > 0) 3 else 2 // some tokens (USDT) require resetting a non-zero allowance first
+                    energy = SunSwapV2.FALLBACK_SWAP_ENERGY + SunSwapV2.FALLBACK_APPROVE_ENERGY * (txCount - 1)
+                } else {
+                    energy = simulateSwap(userAddress, from, to, raw, SwapGuard.minOut(out, SunSwapV2.SLIPPAGE_BPS), path)
+                }
+            } else {
+                energy = simulateSwap(userAddress, from, to, raw, SwapGuard.minOut(out, SunSwapV2.SLIPPAGE_BPS), path)
+            }
+            val energySun = TronFee.energySun(energy, res.energy, p.energySun)
+            val bandwidthSun = TronFee.bandwidthSun(600 * txCount, res.bandwidth, p.bandwidthSun)
+            val feeSun = energySun + bandwidthSun
+            val needSun = feeSun + (if (from.id == null) raw.toLong() else 0L)
+            if (balance < needSun) throw IllegalStateException(
+                "Not enough TRX: this swap needs about ${TronFee.sunToTrx(needSun).toPlainString()} TRX including the network fee " +
+                    "(you have ${TronFee.sunToTrx(balance).toPlainString()} TRX)"
+            )
+            val venue = "SunSwap V2, price impact ${impact / 100.0}%. Network fee about ${TronFee.sunToTrx(feeSun).setScale(1, java.math.RoundingMode.UP).toPlainString()} TRX" +
+                (if (needsApproval) " (estimate: includes the approval, re-checked before the swap)" else "")
+            SwapQuote(chain, from, to, raw, out, SunSwapV2.SLIPPAGE_BPS, needsApproval, null, venue)
+        }
+
+    /** Energy the swap would use right now (read-only simulation of the exact call). Throws if it would revert. */
+    private fun simulateSwap(me: String, from: SwapAsset, to: SwapAsset, raw: BigInteger, minOut: BigInteger, path: List<String>): Long {
+        val call = SunSwapV2.swapCall(from.id, to.id, raw, minOut, TronAddress.decode(me)!!, System.currentTimeMillis() / 1000 + SunSwapV2.DEADLINE_SECONDS, pathBytes(path))
+        val j = constantCall(me, SunSwapV2.ROUTER, call.signature, call.param, call.callValueSun)
+        val energy = j.optLong("energy_used", 0L)
+        if (energy <= 0L) throw IllegalStateException("Could not estimate the energy for this swap")
+        return energy
+    }
+
+    override suspend fun executeSwap(seed: ByteArray, quote: SwapQuote): SwapResult = withContext(Dispatchers.IO) {
+        checkSwapAssets(quote.from, quote.to)
+        check(quote.chain == Chain.TRX) { "Quote is for another network" }
+        val kp = keyPair(seed)
+        val owner = TronAddress.fromKeyPair(kp)
+        val me = TronAddress.toBase58(owner)
+        val from = quote.from
+        val to = quote.to
+        val raw = quote.amountInRaw
+        verifyRouter(me)
+        val pathIds = SunSwapV2.path(from.id, to.id)
+        val minOut = SwapGuard.minOut(quote.expectedOutRaw, quote.slippageBps)
+
+        // The price may have moved since the quote: the minimum is fixed by the quote the user saw.
+        val now = amountsOut(me, raw, pathIds)
+        if (now < minOut) throw IllegalStateException("The price moved more than ${quote.slippageBps / 100.0}% since the quote. Nothing was sent. Get a new quote.")
+
+        val approvals = ArrayList<String>()
+        if (from.id != null) {
+            var have = allowance(me, from.id)
+            if (have < raw) {
+                if (have.signum() > 0) approvals.add(approve(kp, owner, me, from.id, BigInteger.ZERO)) // reset first (USDT rule)
+                approvals.add(approve(kp, owner, me, from.id, raw))                                    // exactly this amount, never unlimited
+                have = allowance(me, from.id)
+                check(have >= raw) { "The approval is not visible on chain yet. Nothing was swapped: try again in a minute." }
+            }
+        }
+
+        val energyUsed = simulateSwap(me, from, to, raw, minOut, pathIds)
+        val p = chainParams()
+        val res = resources(me)
+        val energySun = TronFee.energySun(energyUsed, res.energy, p.energySun)
+        val balance = TronParse.trxBalanceSun(account(me))
+        val inSun = if (from.id == null) raw.toLong() else 0L
+        if (balance < inSun + energySun) throw IllegalStateException("Not enough TRX for the network fee (about ${TronFee.sunToTrx(energySun).toPlainString()} TRX). Nothing was swapped.")
+
+        val deadline = System.currentTimeMillis() / 1000 + SunSwapV2.DEADLINE_SECONDS
+        val call = SunSwapV2.swapCall(from.id, to.id, raw, minOut, owner, deadline, pathBytes(pathIds))
+        val data = TronTx.fromHex(selectorOf(call)) + TronTx.fromHex(call.param)
+        val router = TronAddress.decode(SunSwapV2.ROUTER)!!
+        val ref = latestBlock()
+        val rawData = TronTx.triggerRaw(ref.bytes, ref.hash, ref.expirationMs, ref.timestampMs, owner, router, data, TronFee.feeLimit(energySun), call.callValueSun)
+        val txid = broadcast(kp, rawData)
+        SwapResult(approvals, txid)
+    }
+
+    private fun selectorOf(call: SunSwapV2.Call): String = call.selector
+
+    /** Sends `approve(router, amount)`, waits until it is confirmed on chain, returns its id. */
+    private suspend fun approve(kp: org.web3j.crypto.ECKeyPair, owner: ByteArray, me: String, token: String, amount: BigInteger): String {
+        val contract = TronAddress.decode(token) ?: throw IllegalStateException("Bad token contract")
+        val router = TronAddress.decode(SunSwapV2.ROUTER)!!
+        val sim = constantCall(me, token, SunSwapV2.SIG_APPROVE, SunSwapV2.approveParam(router, amount))
+        val energy = maxOf(sim.optLong("energy_used", 0L), SunSwapV2.FALLBACK_APPROVE_ENERGY / 2)
+        val p = chainParams()
+        val res = resources(me)
+        val energySun = TronFee.energySun(energy, res.energy, p.energySun)
+        val ref = latestBlock()
+        val raw = TronTx.triggerRaw(ref.bytes, ref.hash, ref.expirationMs, ref.timestampMs, owner, contract,
+            SunSwapV2.approveData(router, amount), TronFee.feeLimit(energySun))
+        val id = broadcast(kp, raw)
+        waitForSuccess(id)
+        return id
+    }
+
+    /** Polls until the transaction is in a block and succeeded. Swapping before the approval lands would revert and burn fees. */
+    private suspend fun waitForSuccess(txid: String) {
+        repeat(25) {
+            delay(3_000)
+            val j = JSONObject(post("/wallet/gettransactioninfobyid", JSONObject().put("value", txid)))
+            if (j.has("blockNumber")) {
+                val result = j.optJSONObject("receipt")?.optString("result", "SUCCESS") ?: "SUCCESS"
+                if (result == "SUCCESS") return
+                throw IllegalStateException("The approval failed on chain ($result). Nothing was swapped.")
+            }
+        }
+        throw IllegalStateException("The approval was not confirmed in time. Nothing was swapped; check History.")
+    }
+
     private class Ref(val bytes: ByteArray, val hash: ByteArray, val expirationMs: Long, val timestampMs: Long)
 
     private fun latestBlock(): Ref {
@@ -317,7 +525,7 @@ class TronProvider(
 
         fun mainnet() = TronProvider(
             apiBase = "https://api.trongrid.io", isTestnet = false,
-            explorerTxUrl = "https://tronscan.org/#/transaction/", knownTokens = MAINNET_TOKENS, thor = ThorSwaps()
+            explorerTxUrl = "https://tronscan.org/#/transaction/", knownTokens = MAINNET_TOKENS, thor = ThorSwaps(), sunSwap = true
         )
     }
 }

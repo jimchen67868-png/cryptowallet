@@ -82,11 +82,13 @@ object TronTx {
     /** Smart-contract call (TRC-20 `transfer`), `raw_data` bytes. [feeLimitSun] caps the TRX burned for energy. */
     fun triggerRaw(
         refBlockBytes: ByteArray, refBlockHash: ByteArray, expirationMs: Long, timestampMs: Long,
-        owner: ByteArray, contract: ByteArray, data: ByteArray, feeLimitSun: Long
+        owner: ByteArray, contract: ByteArray, data: ByteArray, feeLimitSun: Long, callValueSun: Long = 0L
     ): ByteArray {
         require(owner.size == TronAddress.SIZE && contract.size == TronAddress.SIZE) { "Bad address length" }
         require(feeLimitSun > 0) { "Fee limit must be positive" }
-        val trigger = ld(1, owner) + ld(2, contract) + ld(4, data) // call_value (3) stays at its default of 0
+        require(callValueSun >= 0) { "Negative call value" }
+        // call_value (3) is the TRX sent with the call (payable swaps); it is left out when 0
+        val trigger = ld(1, owner) + ld(2, contract) + (if (callValueSun > 0) vi(3, callValueSun) else ByteArray(0)) + ld(4, data)
         return raw(refBlockBytes, refBlockHash, expirationMs, timestampMs, TYPE_TRIGGER, URL_TRIGGER, trigger, feeLimitSun, null)
     }
 

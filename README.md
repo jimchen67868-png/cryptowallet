@@ -209,6 +209,24 @@ memo fee (read from the network, shown in the fee line).
 during 2026: THORChain had paused some chains and had TRON vault-observation issues, so a route may be unavailable (the app then
 refuses and sends nothing). A few dollars first, and check the refund path.
 
+### Swapping on Tron itself (SunSwap V2, mainnet only)
+On the TRX card (and the USDT row) tap **Swap**: TRX ↔ USDT through SunSwap V2, a Uniswap V2 fork. The wallet builds the router call
+itself and reads the quote straight from the router contract (`getAmountsOut`, a read-only simulation), so no third-party API supplies
+transaction data. Before TRX is sent to the router the app checks on chain that it is SunSwap's V2 router (`WETH()` = WTRX, `factory()` =
+factory). Router/factory/WTRX addresses come from SunSwap's V2 documentation and an independent on-chain verification.
+- Minimum output is 1% under the quote, re-checked right before signing; the deadline is 5 minutes.
+- Price impact is measured against a tiny trade through the same pool; trades that move it more than 3% are refused.
+- Selling USDT needs an approval for exactly the swap amount (never unlimited), sent and confirmed on chain before the swap. USDT may
+  require resetting a leftover non-zero allowance first, which the app does (an extra transaction).
+- The swap is simulated read-only with the exact call before it is signed, to get the energy cost and to refuse a swap that would revert
+  (a reverting Tron transaction still burns TRX). Energy is paid by burning TRX: this is typically tens of TRX, so a swap needs a TRX
+  balance beyond the amount (the quote shows the estimate and refuses if the balance can't cover it).
+- Only pairs of TRX and the built-in token list (USDT) are offered. More tokens need verified contract addresses first.
+- Only V2 pools are used (not SunSwap V3 / the Smart Router): liquidity may be thinner or pricier than the best route.
+**Litecoin has no tokens or exchange on its own network**, so there is nothing to swap "within" Litecoin; LTC swaps are the THORChain
+cross-chain ones above.
+Verified here: selectors (keccak) and calldata against an independent Python encoder. **Not run live.**
+
 ## What works
 - Create / import wallet, backup confirmation, biometric/PIN unlock
 - Mnemonic encrypted with an AES-256-GCM key in the Android Keystore; seed kept in memory only while unlocked and wiped when the app is backgrounded
