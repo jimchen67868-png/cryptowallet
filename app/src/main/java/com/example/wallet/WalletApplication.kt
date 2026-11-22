@@ -53,7 +53,8 @@ class AppContainer(context: Context) {
         chain: Chain, rpc: String, chainId: Long, tokens: TokenStore, testnet: Boolean,
         testnetName: String, known: List<TokenInfo>, historyApi: String?, explorerTx: String,
         swapId: Int? = null, uniswap: UniswapV3Config? = null,
-        bridgeRoutes: List<BridgeRoute> = emptyList(), relayTestnet: Boolean = false, ccipTestnet: Boolean = false
+        bridgeRoutes: List<BridgeRoute> = emptyList(), relayTestnet: Boolean = false, ccipTestnet: Boolean = false,
+        thor: com.example.wallet.chain.ThorSwaps? = null
     ) = EthereumProvider(
         tokenStore = tokens,
         rpcUrl = rpc,
@@ -68,7 +69,8 @@ class AppContainer(context: Context) {
         uniswap = uniswap,
         bridgeRoutes = bridgeRoutes,
         relayTestnet = relayTestnet,
-        ccipTestnet = ccipTestnet
+        ccipTestnet = ccipTestnet,
+        thor = thor
     )
 
     private val testnetProviders: List<ChainProvider> by lazy {
@@ -100,7 +102,8 @@ class AppContainer(context: Context) {
                 explorerTxUrl = "https://etherscan.io/tx/",
                 isTestnet = false,
                 swapNetworkId = 1,
-                bridgeRoutes = AcrossRoutes.MAINNET
+                bridgeRoutes = AcrossRoutes.MAINNET,
+                thor = com.example.wallet.chain.ThorSwaps()
             ),
             BitcoinProvider(
                 apiBase = "https://mempool.space/api",
@@ -108,7 +111,8 @@ class AppContainer(context: Context) {
                 coinType = 0,
                 p2pkhVersion = 0x00,
                 p2shVersion = 0x05,
-                explorerTxUrl = "https://mempool.space/tx/"
+                explorerTxUrl = "https://mempool.space/tx/",
+                thor = com.example.wallet.chain.ThorSwaps() // Bitcoin mainnet can swap out through THORChain
             ),
             BitcoinProvider.litecoin(),
             SolanaProvider(
@@ -117,13 +121,14 @@ class AppContainer(context: Context) {
             ),
             TronProvider.mainnet(),
             evm(Chain.BASE, "https://base-rpc.publicnode.com", 8453L, mainnetTokens, false,
-                "Mainnet", EvmTokens.BASE, "https://base.blockscout.com/api/v2", "https://basescan.org/tx/", 8453, bridgeRoutes = AcrossRoutes.MAINNET),
+                "Mainnet", EvmTokens.BASE, "https://base.blockscout.com/api/v2", "https://basescan.org/tx/", 8453, bridgeRoutes = AcrossRoutes.MAINNET,
+                thor = com.example.wallet.chain.ThorSwaps()),
             evm(Chain.ARB, "https://arbitrum-one-rpc.publicnode.com", 42161L, mainnetTokens, false,
                 "Mainnet", EvmTokens.ARBITRUM, "https://arbitrum.blockscout.com/api/v2", "https://arbiscan.io/tx/", 42161, bridgeRoutes = AcrossRoutes.MAINNET),
             evm(Chain.POL, "https://polygon-bor-rpc.publicnode.com", 137L, mainnetTokens, false,
                 "Mainnet", EvmTokens.POLYGON, "https://polygon.blockscout.com/api/v2", "https://polygonscan.com/tx/", 137, bridgeRoutes = AcrossRoutes.MAINNET),
             evm(Chain.BNB, "https://bsc-rpc.publicnode.com", 56L, mainnetTokens, false,
-                "Mainnet", EvmTokens.BNB, null, "https://bscscan.com/tx/", 56)
+                "Mainnet", EvmTokens.BNB, null, "https://bscscan.com/tx/", 56, thor = com.example.wallet.chain.ThorSwaps())
         )
     }
 

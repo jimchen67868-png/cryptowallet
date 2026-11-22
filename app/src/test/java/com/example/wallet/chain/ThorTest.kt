@@ -62,7 +62,7 @@ class ThorTest {
 
     // ---- quorum ----
 
-    private fun inbound(addr: String = vault, halted: Boolean = false, paused: Boolean = false) = ThorInbound("LTC", addr, halted, paused)
+    private fun inbound(addr: String = vault, halted: Boolean = false, paused: Boolean = false, router: String = "") = ThorInbound("LTC", addr, halted, paused, router)
 
     @Test fun quorum_needsTwoAgreeingNodes() {
         assertEquals(vault, ThorQuorum.agree(listOf(inbound(), inbound(), null)).first!!.address)
@@ -208,7 +208,7 @@ class ThorTest {
     // ---- configuration ----
 
     @Test fun destinations_areOnlyOurSources_andNeverTheSameChain() {
-        assertEquals(setOf(Chain.LTC, Chain.TRX), ThorAssets.DESTINATIONS.keys)
+        assertEquals(setOf(Chain.BTC, Chain.LTC, Chain.TRX, Chain.ETH, Chain.BASE, Chain.BNB), ThorAssets.DESTINATIONS.keys)
         for ((src, dests) in ThorAssets.DESTINATIONS) {
             assertFalse(src in dests)
             assertNotNull(ThorAssets.asset(src)); assertNotNull(ThorAssets.vaultChain(src))
@@ -223,12 +223,82 @@ class ThorTest {
         assertTrue(BitcoinProvider.litecoin().supportsBridge)
         assertEquals(listOf(Chain.BTC, Chain.ETH, Chain.BASE, Chain.TRX), BitcoinProvider.litecoin().bridgeDestinations())
         assertFalse(BitcoinProvider.litecoin(testnet = true).supportsBridge)
-        assertFalse(BitcoinProvider().supportsBridge)
+        assertFalse(BitcoinProvider().supportsBridge)       // Bitcoin testnet: no THORChain testnet
+        val btcMain = BitcoinProvider(apiBase = "https://mempool.space/api", hrp = "bc", coinType = 0, p2pkhVersion = 0x00,
+            p2shVersion = 0x05, explorerTxUrl = "https://mempool.space/tx/", thor = ThorSwaps())
+        assertTrue(btcMain.supportsBridge)
+        assertEquals(listOf(Chain.LTC, Chain.ETH, Chain.BASE, Chain.TRX), btcMain.bridgeDestinations())
         assertTrue(TronProvider.mainnet().supportsBridge)
         assertEquals(listOf(Chain.LTC, Chain.BTC, Chain.ETH, Chain.BASE), TronProvider.mainnet().bridgeDestinations())
         assertFalse(TronProvider().supportsBridge)
         assertNotNull(BitcoinProvider.litecoin().bridgeProviderNote)
         assertNull(BitcoinProvider().bridgeProviderNote)
+    }
+
+    // ---- EVM sources: the router contract ----
+
+    private val router = "0xD37BbE5744D730a1d98d8DC97c42F0Ca46aD7146"
+    private val evmVault = "0x1111111111111111111111111111111111111111"
+    private val evmDest = "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu"
+    private fun evmInbound(v: String = evmVault, r: String = router) = ThorInbound("ETH", v, false, false, r)
+    private fun evmQuote(v: String = evmVault, r: String = router) =
+        ThorQuoteData(v, "=:BTC.BTC:$evmDest:1", now + 600, big("5000000"), big("20000"), big("100000"), 900, r)
+
+    @Test fun routerCalldata_matchesReferenceEncoder() {
+        val memo = "=:BTC.BTC:bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu:4950000"
+        val data = ThorRouter.depositWithExpiry("0x1111111111111111111111111111111111111111", BigInteger.TEN.pow(18), memo, 1800000900L)
+        assertEquals("0x44bc937b000000000000000000000000111111111111111111111111111111111111111100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000de0b6b3a764000000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000006b49d584000000000000000000000000000000000000000000000000000000000000003c3d3a4254432e4254433a626331716372387465346b723630396763617775746d727a61306a34787638306a79387a3330366679753a3439353030303000000000", data)
+        assertEquals("44bc937b", org.web3j.crypto.Hash.sha3("depositWithExpiry(address,address,uint256,string,uint256)".toByteArray()).copyOfRange(0, 4).hex())
+    }
+
+    @Test fun routerCalldata_rejectsBadInput() {
+        fun bad(block: () -> Unit) { try { block(); fail() } catch (e: IllegalArgumentException) { } }
+        bad { ThorRouter.depositWithExpiry("not-an-address", BigInteger.ONE, "=:BTC.BTC:x:1", 1) }
+        bad { ThorRouter.depositWithExpiry(evmVault, BigInteger.ZERO, "=:BTC.BTC:x:1", 1) }
+        bad { ThorRouter.depositWithExpiry(evmVault, BigInteger.ONE, "", 1) }
+        bad { ThorRouter.depositWithExpiry(evmVault, BigInteger.ONE, "caf\u00e9", 1) }
+    }
+
+    @Test fun unitsToWei_scalesFrom1e8To1e18() {
+        assertEquals(big("10000000000000000"), ThorRouter.unitsToWei(big("1000000")))   // 0.01 coin
+        assertEquals(BigInteger.TEN.pow(18), ThorRouter.unitsToWei(big("100000000")))   // 1 coin
+    }
+
+    @Test fun evmSources_andAssets() {
+        assertEquals(listOf(Chain.BTC, Chain.LTC, Chain.TRX), ThorAssets.DESTINATIONS[Chain.ETH])
+        assertEquals(listOf(Chain.BTC, Chain.LTC, Chain.TRX), ThorAssets.DESTINATIONS[Chain.BNB])
+        assertEquals("BSC.BNB", ThorAssets.asset(Chain.BNB))
+        assertEquals("BSC", ThorAssets.vaultChain(Chain.BNB))
+        assertEquals("ETH", ThorAssets.vaultChain(Chain.ETH))
+    }
+
+    @Test fun quorum_comparesRoutersToo_andEvmAddressesIgnoreCase() {
+        assertNotNull(ThorQuorum.agree(listOf(evmInbound(), evmInbound(r = "0x2222222222222222222222222222222222222222"))).second)
+        assertNull(ThorQuorum.agree(listOf(evmInbound(), evmInbound(v = evmVault.uppercase().replace("0X", "0x"), r = router.lowercase()))).second)
+    }
+
+    @Test fun guard_requiresTheQuotesRouterToMatchTheAgreedOne() {
+        assertNull(ThorGuard.validate(evmQuote(), evmVault, evmDest, big("1000000"), now, router))
+        assertNotNull(ThorGuard.validate(evmQuote(r = "0x2222222222222222222222222222222222222222"), evmVault, evmDest, big("1000000"), now, router))
+        assertNull("case differences are fine", ThorGuard.validate(evmQuote(r = router.lowercase()), evmVault, evmDest, big("1000000"), now, router))
+    }
+
+    @Test fun parse_routerFields() {
+        val q = ThorParse.quote(JSONObject("""{"inbound_address":"$evmVault","router":"$router","expiry":1800000600,"expected_amount_out":"5","fees":{"total":"1"}}"""))
+        assertEquals(router, q.router)
+        val i = ThorParse.inbound(JSONArray("""[{"chain":"ETH","address":"$evmVault","router":"$router","halted":false}]"""), "ETH")!!
+        assertEquals(router, i.router)
+    }
+
+    @Test fun plan_carriesTheRouter_andRecheckCatchesAChange() {
+        val api = FakeApi(evmInbound() to null, evmQuote())
+        val plan = swaps(api).plan(Chain.ETH, Chain.BTC, evmDest, big("1000000"))
+        assertEquals(router, plan.router)
+        assertEquals(evmVault, plan.vault)
+        assertEquals("ETH.ETH", api.asked!![0])
+        swaps(FakeApi(evmInbound() to null, evmQuote())).recheck(plan)
+        try { swaps(FakeApi(evmInbound(r = "0x2222222222222222222222222222222222222222") to null, evmQuote())).recheck(plan); fail() } catch (e: IllegalStateException) { }
+        assertTrue(swaps(FakeApi(evmInbound() to null, evmQuote())).dryRunReport(plan).contains("Router contract: $router"))
     }
 
     // ---- OP_RETURN and coin selection ----

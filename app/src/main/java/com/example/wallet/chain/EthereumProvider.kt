@@ -56,7 +56,9 @@ class EthereumProvider(
     /** Bridge TEST ETH to the other Relay testnet (Sepolia <-> Base Sepolia). Never set on mainnet. */
     private val relayTestnet: Boolean = false,
     /** Bridge the CCIP-BnM test token between Sepolia and BNB testnet through Chainlink CCIP. Never set on mainnet. */
-    private val ccipTestnet: Boolean = false
+    private val ccipTestnet: Boolean = false,
+    /** THORChain swaps from the native coin to Bitcoin, Litecoin and Tron (mainnet only). */
+    private val thor: ThorSwaps? = null
 ) : ChainProvider {
 
     override val chain = evmChain
@@ -320,14 +322,81 @@ class EthereumProvider(
     override val supportsBridge: Boolean
         get() = if (relayTestnet || ccipTestnet) {
             (relayTestnet && RelayTestnet.chainIdOf(chain) != null) || ccipLane != null
-        } else originRoute != null && bridgeRoutes.size > 1
+        } else (originRoute != null && bridgeRoutes.size > 1) || thorDestinations().isNotEmpty()
+
+    private fun thorDestinations(): List<Chain> = if (isTestnet) emptyList() else thor?.destinationsFrom(chain).orEmpty()
 
     override fun bridgeDestinations(): List<Chain> = when {
         relayTestnet || ccipTestnet ->
             ((if (relayTestnet) RelayTestnet.destinations(chain) else emptyList()) +
                 (if (ccipTestnet) CcipTestnet.destinations(chain) else emptyList())).distinct()
-        supportsBridge -> bridgeRoutes.map { it.chain }.filter { it != chain }
-        else -> emptyList()
+        else -> ((if (originRoute != null && bridgeRoutes.size > 1) bridgeRoutes.map { it.chain }.filter { it != chain } else emptyList()) +
+            thorDestinations()).distinct()
+    }
+
+    // ---- THORChain: native coin -> BTC / LTC / TRX, paid into THORChain's router contract ----
+
+    override suspend fun quoteBridgeTo(
+        userAddress: String, from: SwapAsset, dest: Chain, destAddress: String, amount: BigDecimal
+    ): BridgeQuote =
+        if (dest in thorDestinations()) quoteThor(userAddress, from, dest, destAddress, amount)
+        else quoteBridge(userAddress, from, dest, amount)
+
+    private suspend fun quoteThor(user: String, from: SwapAsset, dest: Chain, destAddress: String, amount: BigDecimal): BridgeQuote =
+        withContext(Dispatchers.IO) {
+            val t = thor ?: throw UnsupportedOperationException("Swaps are not supported here")
+            require(from.id == null) { "Only ${chain.symbol} itself can be swapped to ${dest.label} (not tokens yet)" }
+            val units = try {
+                amount.movePointRight(8).toBigIntegerExact()
+            } catch (e: ArithmeticException) {
+                throw IllegalArgumentException("At most 8 decimal places are allowed for this swap")
+            }
+            require(units.signum() > 0) { "Invalid amount" }
+            val plan = t.plan(chain, dest, destAddress, units)
+            val (data, wei) = thorCall(plan)
+            val gas = gasForCall(user, plan.router, wei, data) // fails closed if the router would reject this call
+            val gasPrice = web3.ethGasPrice().send().gasPrice
+            t.toBridgeQuote(plan, from, gas.multiply(gasPrice), 18)
+        }
+
+    /** Calldata and value for the router deposit of [plan]. Also checks that both addresses are well-formed. */
+    private fun thorCall(plan: ThorPlan): Pair<String, BigInteger> {
+        check(WalletUtils.isValidAddress(plan.vault) && WalletUtils.isValidAddress(plan.router)) { "THORChain gave an address this wallet can't pay" }
+        val wei = ThorRouter.unitsToWei(plan.amountIn)
+        val data = ThorRouter.depositWithExpiry(plan.vault, wei, plan.memo, nowSeconds() + ThorRouter.EXPIRY_SECONDS)
+        return data to wei
+    }
+
+    private fun checkRouterHasCode(router: String) {
+        val code = web3.ethGetCode(router, org.web3j.protocol.core.DefaultBlockParameterName.LATEST).send().code
+        check(code != null && code.length > 2) { "THORChain's router has no contract code on this network. Nothing was sent." }
+    }
+
+    private fun executeThor(seed: ByteArray, quote: BridgeQuote, plan: ThorPlan): SwapResult {
+        val t = thor ?: throw UnsupportedOperationException("Swaps are not supported here")
+        check(plan.from == chain && quote.chain == chain) { "Quote is for another network" }
+        t.recheck(plan)
+        checkRouterHasCode(plan.router)
+        val creds = credentials(seed)
+        val (data, wei) = thorCall(plan)
+        val hash = sendCall(RawTransactionManager(web3, creds, chainId), creds.address, plan.router, wei, data)
+        return SwapResult(emptyList(), hash)
+    }
+
+    override suspend fun dryRunBridge(userAddress: String, quote: BridgeQuote): String = withContext(Dispatchers.IO) {
+        val plan = quote.payload as? ThorPlan ?: return@withContext "A dry run is not available for this route."
+        val t = thor ?: throw UnsupportedOperationException("Swaps are not supported here")
+        check(plan.from == chain && quote.chain == chain) { "Quote is for another network" }
+        val report = t.dryRunReport(plan)
+        checkRouterHasCode(plan.router)
+        val (data, wei) = thorCall(plan)
+        val gas = gasForCall(userAddress, plan.router, wei, data)
+        val fee = Convert.fromWei(BigDecimal(gas.multiply(web3.ethGasPrice().send().gasPrice)), Convert.Unit.ETHER)
+        report + "\nTransaction that would be sent:\n" +
+            "- call depositWithExpiry on the router with ${Convert.fromWei(BigDecimal(wei), Convert.Unit.ETHER).toPlainString()} ${chain.symbol}\n" +
+            "- the router has contract code on ${chain.label}\n" +
+            "- the node simulated the call: it would succeed\n" +
+            "- gas about ${gas} units, network fee about ${fee.toPlainString()} ${chain.symbol}"
     }
 
     // ---- Chainlink CCIP (testnet): CCIP-BnM between Sepolia and BNB testnet, called on the Router directly ----
@@ -464,6 +533,7 @@ class EthereumProvider(
     }
 
     override suspend fun executeBridge(seed: ByteArray, quote: BridgeQuote): SwapResult = withContext(Dispatchers.IO) {
+        (quote.payload as? ThorPlan)?.let { return@withContext executeThor(seed, quote, it) }
         if (relayTestnet || ccipTestnet) {
             if (ccipLane != null && quote.from.id != null && CcipTestnet.laneOf(quote.destChain) != null) {
                 return@withContext executeCcip(seed, quote)

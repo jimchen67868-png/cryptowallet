@@ -22,16 +22,22 @@ import java.math.BigInteger
  */
 object ThorAssets {
     private val assets = mapOf(
-        Chain.BTC to "BTC.BTC", Chain.LTC to "LTC.LTC", Chain.ETH to "ETH.ETH", Chain.BASE to "BASE.ETH", Chain.TRX to "TRON.TRX"
+        Chain.BTC to "BTC.BTC", Chain.LTC to "LTC.LTC", Chain.ETH to "ETH.ETH", Chain.BASE to "BASE.ETH", Chain.TRX to "TRON.TRX",
+        Chain.BNB to "BSC.BNB"
     )
     private val vaultChains = mapOf(
-        Chain.BTC to "BTC", Chain.LTC to "LTC", Chain.ETH to "ETH", Chain.BASE to "BASE", Chain.TRX to "TRON"
+        Chain.BTC to "BTC", Chain.LTC to "LTC", Chain.ETH to "ETH", Chain.BASE to "BASE", Chain.TRX to "TRON", Chain.BNB to "BSC"
     )
 
     /** What each source can deliver to. Native coins only; EVM outputs go to the wallet's own EVM address. */
     val DESTINATIONS: Map<Chain, List<Chain>> = mapOf(
+        Chain.BTC to listOf(Chain.LTC, Chain.ETH, Chain.BASE, Chain.TRX),
         Chain.LTC to listOf(Chain.BTC, Chain.ETH, Chain.BASE, Chain.TRX),
-        Chain.TRX to listOf(Chain.LTC, Chain.BTC, Chain.ETH, Chain.BASE)
+        Chain.TRX to listOf(Chain.LTC, Chain.BTC, Chain.ETH, Chain.BASE),
+        // EVM sources pay THORChain's router contract (native coin only for now): ETH, Base and BNB Chain
+        Chain.ETH to listOf(Chain.BTC, Chain.LTC, Chain.TRX),
+        Chain.BASE to listOf(Chain.BTC, Chain.LTC, Chain.TRX),
+        Chain.BNB to listOf(Chain.BTC, Chain.LTC, Chain.TRX)
     )
 
     fun asset(chain: Chain): String? = assets[chain]
@@ -61,7 +67,9 @@ class ThorInbound(
     val chain: String,
     val address: String,
     val halted: Boolean,
-    val tradingPaused: Boolean
+    val tradingPaused: Boolean,
+    /** EVM chains only: the router contract that deposits must go through (empty elsewhere). */
+    val router: String = ""
 )
 
 /** The parts of `/thorchain/quote/swap` that this wallet uses. Amounts are THORChain 1e8 units. */
@@ -72,7 +80,8 @@ class ThorQuoteData(
     val expectedOut: BigInteger,
     val feesTotal: BigInteger,
     val minIn: BigInteger,
-    val etaSeconds: Long
+    val etaSeconds: Long,
+    val router: String = ""
 )
 
 object ThorParse {
@@ -90,7 +99,8 @@ object ThorParse {
             expectedOut = big("expected_amount_out"),
             feesTotal = fees?.optString("total", "")?.toBigIntegerOrNull() ?: BigInteger.ZERO,
             minIn = big("recommended_min_amount_in"),
-            etaSeconds = j.optLong("total_swap_seconds", 0L)
+            etaSeconds = j.optLong("total_swap_seconds", 0L),
+            router = j.optString("router", "")
         )
     }
 
@@ -102,7 +112,8 @@ object ThorParse {
                 chain = chainCode,
                 address = o.optString("address", ""),
                 halted = o.optBoolean("halted", false),
-                tradingPaused = o.optBoolean("chain_trading_paused", false) || o.optBoolean("global_trading_paused", false)
+                tradingPaused = o.optBoolean("chain_trading_paused", false) || o.optBoolean("global_trading_paused", false),
+                router = o.optString("router", "")
             )
         }
         return null
@@ -118,7 +129,8 @@ object ThorQuorum {
         val got = responses.filterNotNull()
         if (got.size < MIN_NODES) return null to "Could not confirm the THORChain vault with $MIN_NODES independent nodes. Nothing was sent."
         if (got.any { it.address.isEmpty() }) return null to "THORChain has no inbound address for this network right now."
-        if (got.map { it.address }.toSet().size != 1) return null to "THORChain nodes disagree about the vault address. Nothing was sent."
+        if (got.map { it.address.lowercase() }.toSet().size != 1) return null to "THORChain nodes disagree about the vault address. Nothing was sent."
+        if (got.map { it.router.lowercase() }.toSet().size != 1) return null to "THORChain nodes disagree about the router contract. Nothing was sent."
         if (got.any { it.halted || it.tradingPaused }) return null to "THORChain has paused this network right now."
         return got.first() to null
     }
@@ -130,8 +142,12 @@ object ThorGuard {
     const val MIN_SECONDS_LEFT = 90L
 
     /** Null if the quote may be used, otherwise the reason it may not. */
-    fun validate(q: ThorQuoteData, vault: String, destAddress: String, amountIn: BigInteger, nowSec: Long): String? {
-        if (q.inboundAddress != vault) return "THORChain's quote names a different vault than the nodes agreed on"
+    /** EVM addresses compare case-insensitively (checksum casing varies); Base58/bech32 addresses compare exactly. */
+    fun sameAddress(a: String, b: String): Boolean = if (a.startsWith("0x") || b.startsWith("0x")) a.equals(b, ignoreCase = true) else a == b
+
+    fun validate(q: ThorQuoteData, vault: String, destAddress: String, amountIn: BigInteger, nowSec: Long, router: String = ""): String? {
+        if (!sameAddress(q.inboundAddress, vault)) return "THORChain's quote names a different vault than the nodes agreed on"
+        if (router.isNotEmpty() && !sameAddress(q.router, router)) return "THORChain's quote names a different router contract than the nodes agreed on"
         val memoDest = q.memo?.let { ThorMemo.destination(it) }
         if (q.memo != null && memoDest != destAddress) return "THORChain's quote has a different destination address than yours"
         if (q.expiry - nowSec < MIN_SECONDS_LEFT) return "The quote is about to expire. Get a new one."
@@ -159,7 +175,9 @@ class ThorPlan(
     val feesTotal: BigInteger,     // 1e8 units, in the output asset
     val expirySec: Long,
     val etaSeconds: Long,
-    val destAddress: String
+    val destAddress: String,
+    /** EVM sources: the router contract to call (verified on several nodes); empty for Bitcoin-family and Tron. */
+    val router: String = ""
 )
 
 /** THORNode REST API (keyless). Several independent endpoints so that no single one can choose the vault. */
@@ -211,10 +229,10 @@ class ThorSwaps(
         val (inbound, err) = api.inbound(vaultChain)
         if (inbound == null) throw IllegalStateException(err ?: "THORChain is not available")
         val q = api.quote(fromAsset, toAsset, amountIn, destAddress)
-        ThorGuard.validate(q, inbound.address, destAddress, amountIn, clockSec())?.let { throw IllegalStateException(it) }
+        ThorGuard.validate(q, inbound.address, destAddress, amountIn, clockSec(), inbound.router)?.let { throw IllegalStateException(it) }
         val minOut = ThorGuard.minOut(q.expectedOut)
         val memo = ThorMemo.swap(toAsset, destAddress, minOut) // built here; the API's memo was only compared
-        return ThorPlan(from, dest, inbound.address, memo, amountIn, q.expectedOut, minOut, q.feesTotal, q.expiry, q.etaSeconds, destAddress)
+        return ThorPlan(from, dest, inbound.address, memo, amountIn, q.expectedOut, minOut, q.feesTotal, q.expiry, q.etaSeconds, destAddress, inbound.router)
     }
 
     /** Re-checks, right before signing, that the vault is still the agreed one and the plan has not expired. */
@@ -223,7 +241,9 @@ class ThorSwaps(
         val vaultChain = ThorAssets.vaultChain(plan.from) ?: throw IllegalStateException("Unsupported network")
         val (inbound, err) = api.inbound(vaultChain)
         if (inbound == null) throw IllegalStateException(err ?: "THORChain is not available")
-        if (inbound.address != plan.vault) throw IllegalStateException("THORChain's vault changed since the quote. Get a new quote.")
+        if (!ThorGuard.sameAddress(inbound.address, plan.vault) || !ThorGuard.sameAddress(inbound.router, plan.router)) {
+            throw IllegalStateException("THORChain's vault or router changed since the quote. Get a new quote.")
+        }
     }
 
     /** The part of a dry run that is the same for every source chain. Re-runs the vault check; throws if it fails. */
@@ -237,6 +257,7 @@ class ThorSwaps(
             "- chain not paused, quote not expired (${left / 60} min ${left % 60} s left)\n" +
             "- amount above the quote's minimum, fees within ${ThorGuard.MAX_FEE_PERCENT}%\n\n" +
             "Vault: ${plan.vault}\n" +
+            (if (plan.router.isNotEmpty()) "Router contract: ${plan.router}\n" else "") +
             "Memo (${plan.memo.length} bytes): ${plan.memo}\n" +
             "Your destination (${plan.dest.label}): ${plan.destAddress}\n" +
             "Send: ${amt(plan.amountIn)} ${plan.from.symbol}\n" +
@@ -269,4 +290,32 @@ class ThorSwaps(
             "The wallet builds the memo itself and checks the vault address against several THORChain nodes. Fees (including " +
             "THORChain's outbound fee, which can be large for small amounts) come out of the output. Start with a small amount."
     }
+}
+
+/** THORChain's EVM router: native coin goes in through `depositWithExpiry(vault, asset, amount, memo, expiry)`. */
+object ThorRouter {
+    const val NATIVE_ASSET = "0x0000000000000000000000000000000000000000"
+    const val EXPIRY_SECONDS = 900L
+
+    /** Hex calldata (with 0x). For the native coin the same amount must also be sent as the transaction value. */
+    fun depositWithExpiry(vault: String, amountWei: BigInteger, memo: String, expirySec: Long): String {
+        require(Regex("0x[0-9a-fA-F]{40}").matches(vault)) { "Bad vault address" }
+        require(amountWei.signum() > 0) { "Bad amount" }
+        require(memo.isNotEmpty() && memo.all { it.code in 0x20..0x7e }) { "Bad memo" }
+        val fn = org.web3j.abi.datatypes.Function(
+            "depositWithExpiry",
+            listOf(
+                org.web3j.abi.datatypes.Address(vault),
+                org.web3j.abi.datatypes.Address(NATIVE_ASSET),
+                org.web3j.abi.datatypes.generated.Uint256(amountWei),
+                org.web3j.abi.datatypes.Utf8String(memo),
+                org.web3j.abi.datatypes.generated.Uint256(BigInteger.valueOf(expirySec))
+            ),
+            emptyList()
+        )
+        return org.web3j.abi.FunctionEncoder.encode(fn)
+    }
+
+    /** THORChain amounts use 1e8 units; the native EVM coin has 18 decimals, so wei = units * 1e10. */
+    fun unitsToWei(units: BigInteger): BigInteger = units.multiply(BigInteger.TEN.pow(10))
 }

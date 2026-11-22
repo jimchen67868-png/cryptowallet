@@ -193,10 +193,13 @@ should be a few dollars (or Nile/Litecoin testnet coins).
 
 ### Swaps and bridging for Litecoin and Tron (THORChain, mainnet only)
 Neither chain is covered by LI.FI or ParaSwap, so LTC and TRX use THORChain (native swaps, no wrapped coins). On the LTC and TRX cards
-tap **Swap**. From **LTC** you can go to BTC, ETH, Base ETH and TRX; from **TRX** to LTC, BTC, ETH and Base ETH. The output arrives as the
-native coin at your own address on the destination network. Not offered: swaps *into* LTC/TRX from BTC/EVM chains (they need the
-THORChain EVM router flow, not built), swapping USDT-TRON, Solana/Arbitrum/Polygon/BNB destinations, testnets (THORChain has no
-matching public testnet).
+tap **Swap**. From **LTC** you can go to BTC, ETH, Base ETH and TRX; from **BTC** to LTC, ETH, Base ETH and TRX; from **TRX** to LTC, BTC, ETH and Base ETH. The output arrives as the
+native coin at your own address on the destination network. **From ETH, Base and BNB Chain** (native coin only) you can swap to BTC, LTC and TRX: the wallet pays THORChain's router contract with
+`depositWithExpiry(vault, 0x0, amount, memo, expiry)` and the native coin as the transaction value. The router address must be identical on at
+least two nodes (same rule as the vault), the app checks that it has contract code on that network, and `eth_estimateGas` simulates the exact call
+before anything is signed (it fails closed). Amounts for these swaps are limited to 8 decimal places (THORChain uses 1e8 units). Reported in 2026:
+THORChain had halted BNB Chain trading, in which case the quote is refused. Not offered: swapping *tokens* (USDC, USDT...) from EVM chains
+(needs an approval step), USDT-TRON, Solana/Arbitrum/Polygon, and testnets (THORChain has no matching public testnet).
 How it is made safe against a bad API (the vault address and memo decide where funds go):
 - the memo (`=:ASSET:YOUR_ADDRESS:MIN_OUT`) is built in the app; the API's memo is only compared with ours;
 - the inbound vault must be identical on at least two of three independent THORNode endpoints, checked again right before signing;
