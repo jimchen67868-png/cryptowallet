@@ -186,10 +186,28 @@ Things that differ from other chains and are included in the fee shown before yo
 - A USDT transfer needs "energy". Without staked TRX the energy is burned from your TRX balance: several TRX, more if the recipient holds no USDT yet.
   You need TRX in the same wallet to send USDT. The fee estimate comes from a `triggerconstantcontract` simulation; `fee_limit` is the estimate + 25% (max 200 TRX).
 - The $100 mainnet cap applies to the amount of TRX/USDT, not to the fee.
-Not supported: staking/resources, TRC-10 tokens, swaps and bridges for LTC/TRX, custom TRC-20 tokens.
+Not supported: staking/resources, TRC-10 tokens, custom TRC-20 tokens, swapping USDT-TRON.
 Verified here: addresses (priv key 1 and the standard mnemonic), the protobuf bytes and txID against published TronGrid captures,
 signing against an independent Python implementation. **Not run against live networks from the dev environment:** the first real use
 should be a few dollars (or Nile/Litecoin testnet coins).
+
+### Swaps and bridging for Litecoin and Tron (THORChain, mainnet only)
+Neither chain is covered by LI.FI or ParaSwap, so LTC and TRX use THORChain (native swaps, no wrapped coins). On the LTC and TRX cards
+tap **Swap**. From **LTC** you can go to BTC, ETH, Base ETH and TRX; from **TRX** to LTC, BTC, ETH and Base ETH. The output arrives as the
+native coin at your own address on the destination network. Not offered: swaps *into* LTC/TRX from BTC/EVM chains (they need the
+THORChain EVM router flow, not built), swapping USDT-TRON, Solana/Arbitrum/Polygon/BNB destinations, testnets (THORChain has no
+matching public testnet).
+How it is made safe against a bad API (the vault address and memo decide where funds go):
+- the memo (`=:ASSET:YOUR_ADDRESS:MIN_OUT`) is built in the app; the API's memo is only compared with ours;
+- the inbound vault must be identical on at least two of three independent THORNode endpoints, checked again right before signing;
+- refused: paused/halted chains, quotes close to expiry, amounts under the quote's minimum, fees over 5% of the swap;
+- minimum output is 1% under the quote; if the price moves more, or the swap fails, THORChain refunds the input minus fees.
+Litecoin: three outputs (vault, change, OP_RETURN memo, max 80 bytes). Tron: memo in `raw_data.data`; Tron burns an extra network
+memo fee (read from the network, shown in the fee line).
+**Not run live from the dev environment.** The THORNode JSON shapes come from THORChain's docs; the Tron memo placement
+(`raw_data.data`) follows how other wallets and THORChain's TRON client do it but was not confirmed against a live swap. Reported
+during 2026: THORChain had paused some chains and had TRON vault-observation issues, so a route may be unavailable (the app then
+refuses and sends nothing). A few dollars first, and check the refund path.
 
 ## What works
 - Create / import wallet, backup confirmation, biometric/PIN unlock

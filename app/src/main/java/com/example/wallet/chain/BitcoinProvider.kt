@@ -8,6 +8,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.math.BigDecimal
+import java.math.BigInteger
 import java.security.MessageDigest
 import kotlin.math.ceil
 
@@ -31,7 +32,9 @@ class BitcoinProvider(
     override val isTestnet: Boolean = hrp != "bc",
     /** Extra Base58 script-hash version bytes accepted as destinations (Litecoin's legacy "3..." / "2..." P2SH). */
     private val extraP2shVersions: Set<Int> = emptySet(),
-    private val dust: Long = CoinSelection.DUST
+    private val dust: Long = CoinSelection.DUST,
+    /** THORChain swaps (Litecoin mainnet only). */
+    private val thor: ThorSwaps? = null
 ) : ChainProvider {
 
     override val supportsSend = true
@@ -63,6 +66,10 @@ class BitcoinProvider(
         }
 
     override suspend fun send(seed: ByteArray, to: String, amount: BigDecimal): String =
+        sendInternal(seed, to, amount, null)
+
+    /** [memo] (THORChain swaps) becomes a third output: vault, change, OP_RETURN, in that order. */
+    private suspend fun sendInternal(seed: ByteArray, to: String, amount: BigDecimal, memo: ByteArray?): String =
         withContext(Dispatchers.IO) {
             val kp = keyPair(seed)
             val pub = kp.publicKeyPoint.getEncoded(true)
@@ -72,11 +79,12 @@ class BitcoinProvider(
 
             val destScript = scriptForAddress(to.trim()) ?: throw IllegalArgumentException("Invalid address")
             val sats = toSats(amount)
-            val plan = plan(myAddress, destScript, sats)
+            val plan = plan(myAddress, destScript, sats, memo?.let { BitcoinTx.opReturnOutputBytes(it) } ?: 0)
 
             val outputs = buildList {
                 add(TxOut(sats, destScript))
                 if (plan.change > 0) add(TxOut(plan.change, myScript)) // change returns to our address
+                if (memo != null) add(TxOut(0L, BitcoinTx.opReturnScript(memo)))
             }
             // Safety: inputs - outputs must equal exactly the planned fee
             val inTotal = plan.inputs.sumOf { it.value }
@@ -173,8 +181,38 @@ class BitcoinProvider(
         return maxOf(1.0, j.getDouble("halfHourFee"))
     }
 
-    private fun plan(address: String, destScript: ByteArray, sats: Long): CoinSelection.Plan =
-        CoinSelection.select(fetchUtxos(address), sats, destScript.size, feeRate(), dust)
+    private fun plan(address: String, destScript: ByteArray, sats: Long, extraBytes: Int = 0): CoinSelection.Plan =
+        CoinSelection.select(fetchUtxos(address), sats, destScript.size, feeRate(), dust, extraBytes)
+
+    // ---- THORChain swaps (Litecoin mainnet) ----
+
+    override val supportsBridge: Boolean get() = thor != null
+
+    override fun bridgeDestinations(): List<Chain> = thor?.destinationsFrom(chain).orEmpty()
+
+    override val bridgeProviderNote: String? get() = if (thor != null) ThorSwaps.PROVIDER_NOTE else null
+
+    override suspend fun quoteBridgeTo(
+        userAddress: String, from: SwapAsset, dest: Chain, destAddress: String, amount: BigDecimal
+    ): BridgeQuote = withContext(Dispatchers.IO) {
+        val t = thor ?: throw UnsupportedOperationException("Swaps are not supported on ${chain.label}")
+        require(from.id == null) { "Only ${chain.symbol} itself can be swapped to another network" }
+        val sats = toSats(amount)
+        val plan = t.plan(chain, dest, destAddress, BigInteger.valueOf(sats))
+        val vaultScript = scriptForAddress(plan.vault) ?: throw IllegalStateException("THORChain gave an address this wallet can't pay")
+        val memo = plan.memo.toByteArray(Charsets.US_ASCII)
+        val fee = CoinSelection.select(fetchUtxos(userAddress), sats, vaultScript.size, feeRate(), dust, BitcoinTx.opReturnOutputBytes(memo)).fee
+        t.toBridgeQuote(plan, from, BigInteger.valueOf(fee), nativeDecimals)
+    }
+
+    override suspend fun executeBridge(seed: ByteArray, quote: BridgeQuote): SwapResult = withContext(Dispatchers.IO) {
+        val t = thor ?: throw UnsupportedOperationException("Swaps are not supported on ${chain.label}")
+        val plan = quote.payload as? ThorPlan ?: throw IllegalStateException("Not a THORChain quote")
+        check(plan.from == chain && quote.chain == chain) { "Quote is for another network" }
+        t.recheck(plan)
+        val txid = sendInternal(seed, plan.vault, BigDecimal(plan.amountIn).movePointLeft(8), plan.memo.toByteArray(Charsets.US_ASCII))
+        SwapResult(emptyList(), txid)
+    }
 
     /** Output script for any supported destination address, or null if invalid. */
     internal fun scriptForAddress(address: String): ByteArray? {
@@ -216,7 +254,8 @@ class BitcoinProvider(
         ) else BitcoinProvider(
             apiBase = "https://litecoinspace.org/api", hrp = "ltc", coinType = 2,
             p2pkhVersion = 0x30, p2shVersion = 0x32, explorerTxUrl = "https://litecoinspace.org/tx/",
-            chain = Chain.LTC, isTestnet = false, extraP2shVersions = setOf(0x05), dust = LTC_DUST
+            chain = Chain.LTC, isTestnet = false, extraP2shVersions = setOf(0x05), dust = LTC_DUST,
+            thor = ThorSwaps()
         )
 
         const val LTC_DUST = 5460L

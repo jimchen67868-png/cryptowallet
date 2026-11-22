@@ -45,13 +45,21 @@ class BridgeQuote(
     val needsApproval: Boolean,
     /** A separate fee paid in the source chain's native coin on top of the amount (CCIP). Zero when fees come out of the amount. */
     val networkFeeRaw: BigInteger = BigInteger.ZERO,
-    val networkFeeSymbol: String = ""
+    val networkFeeSymbol: String = "",
+    /** Decimals of [networkFeeRaw]: 18 for EVM coins, 8 for Litecoin, 6 for Tron. */
+    val networkFeeDecimals: Int = 18,
+    /** Whatever the provider needs to execute this quote (THORChain: the checked plan). Never shown. */
+    val payload: Any? = null,
+    /** The user's own address on [destChain] when the provider needs one (THORChain), shown before confirming. */
+    val destAddress: String? = null,
+    /** Provider-specific explanation shown in the confirmation instead of the Across refund text. */
+    val note: String? = null
 ) {
     val amountIn: BigDecimal get() = BigDecimal(amountInRaw).movePointLeft(decimals)
     val amountOut: BigDecimal get() = BigDecimal(amountOutRaw).movePointLeft(decimals)
     val fee: BigDecimal get() = BigDecimal(feeRaw).movePointLeft(decimals)
-    /** The separate native-coin fee (18 decimals on every EVM chain here), or zero. */
-    val networkFee: BigDecimal get() = BigDecimal(networkFeeRaw).movePointLeft(18)
+    /** The separate native-coin fee, or zero. */
+    val networkFee: BigDecimal get() = BigDecimal(networkFeeRaw).movePointLeft(networkFeeDecimals)
     val feePercent: Double
         get() = if (amountInRaw.signum() == 0) 0.0
         else BigDecimal(feeRaw).multiply(BigDecimal(100)).divide(BigDecimal(amountInRaw), 2, RoundingMode.HALF_UP).toDouble()

@@ -12,6 +12,16 @@ class TxOut(val value: Long, val script: ByteArray)
 /** Builds and signs native SegWit (P2WPKH) transactions per BIP-141 / BIP-143. */
 object BitcoinTx {
     const val DEFAULT_SEQUENCE = 0xfffffffdL // opt-in RBF
+
+    /** `OP_RETURN <data>` output script (standard relay limit: 80 bytes of data). */
+    fun opReturnScript(data: ByteArray): ByteArray {
+        require(data.isNotEmpty() && data.size <= 80) { "OP_RETURN data must be 1 to 80 bytes" }
+        return if (data.size <= 75) byteArrayOf(0x6a, data.size.toByte()) + data
+        else byteArrayOf(0x6a, 0x4c, data.size.toByte()) + data // OP_PUSHDATA1 for 76..80 bytes
+    }
+
+    /** Serialized size of the zero-value OP_RETURN output: 8 value + 1 script length + script. */
+    fun opReturnOutputBytes(data: ByteArray): Int = 9 + opReturnScript(data).size
     private const val SIGHASH_ALL = 1L
 
     /**
@@ -135,17 +145,18 @@ object CoinSelection {
     class Plan(val inputs: List<Utxo>, val fee: Long, val change: Long)
 
     /** Virtual size: 11 overhead + 68 per P2WPKH input + outputs (8 value + 1 length + script). */
-    fun vsize(inputs: Int, destScriptSize: Int, withChange: Boolean): Int =
-        11 + 68 * inputs + (9 + destScriptSize) + (if (withChange) 31 else 0)
+    fun vsize(inputs: Int, destScriptSize: Int, withChange: Boolean, extraBytes: Int = 0): Int =
+        11 + 68 * inputs + (9 + destScriptSize) + (if (withChange) 31 else 0) + extraBytes
 
-    fun select(utxos: List<Utxo>, sats: Long, destScriptSize: Int, feeRate: Double, dust: Long = DUST): Plan {
+    /** [extraBytes]: size of additional zero-value outputs, e.g. [BitcoinTx.opReturnOutputBytes]. */
+    fun select(utxos: List<Utxo>, sats: Long, destScriptSize: Int, feeRate: Double, dust: Long = DUST, extraBytes: Int = 0): Plan {
         require(sats > 0) { "Amount must be positive" }
         require(feeRate > 0) { "Fee rate must be positive" }
         val sorted = utxos.sortedByDescending { it.value }
         if (sorted.isEmpty()) throw IllegalStateException("No confirmed funds available")
 
         fun fee(inputs: Int, withChange: Boolean) =
-            ceil(feeRate * vsize(inputs, destScriptSize, withChange)).toLong()
+            ceil(feeRate * vsize(inputs, destScriptSize, withChange, extraBytes)).toLong()
 
         val selected = mutableListOf<Utxo>()
         var total = 0L

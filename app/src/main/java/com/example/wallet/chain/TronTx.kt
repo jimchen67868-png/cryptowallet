@@ -65,15 +65,18 @@ object TronTx {
     private const val URL_TRANSFER = "type.googleapis.com/protocol.TransferContract"
     private const val URL_TRIGGER = "type.googleapis.com/protocol.TriggerSmartContract"
 
-    /** TRX transfer, `raw_data` bytes. All times are milliseconds. */
+    /**
+     * TRX transfer, `raw_data` bytes. All times are milliseconds. [memo] goes into `raw_data.data` (field 10); Tron burns a
+     * small network-set memo fee for it. THORChain swaps read their instructions from there.
+     */
     fun transferRaw(
         refBlockBytes: ByteArray, refBlockHash: ByteArray, expirationMs: Long, timestampMs: Long,
-        owner: ByteArray, to: ByteArray, amountSun: Long
+        owner: ByteArray, to: ByteArray, amountSun: Long, memo: ByteArray? = null
     ): ByteArray {
         require(owner.size == TronAddress.SIZE && to.size == TronAddress.SIZE) { "Bad address length" }
         require(amountSun > 0) { "Amount must be positive" }
         val transfer = ld(1, owner) + ld(2, to) + vi(3, amountSun)
-        return raw(refBlockBytes, refBlockHash, expirationMs, timestampMs, TYPE_TRANSFER, URL_TRANSFER, transfer, null)
+        return raw(refBlockBytes, refBlockHash, expirationMs, timestampMs, TYPE_TRANSFER, URL_TRANSFER, transfer, null, memo)
     }
 
     /** Smart-contract call (TRC-20 `transfer`), `raw_data` bytes. [feeLimitSun] caps the TRX burned for energy. */
@@ -84,17 +87,18 @@ object TronTx {
         require(owner.size == TronAddress.SIZE && contract.size == TronAddress.SIZE) { "Bad address length" }
         require(feeLimitSun > 0) { "Fee limit must be positive" }
         val trigger = ld(1, owner) + ld(2, contract) + ld(4, data) // call_value (3) stays at its default of 0
-        return raw(refBlockBytes, refBlockHash, expirationMs, timestampMs, TYPE_TRIGGER, URL_TRIGGER, trigger, feeLimitSun)
+        return raw(refBlockBytes, refBlockHash, expirationMs, timestampMs, TYPE_TRIGGER, URL_TRIGGER, trigger, feeLimitSun, null)
     }
 
     private fun raw(
         refBytes: ByteArray, refHash: ByteArray, expirationMs: Long, timestampMs: Long,
-        type: Long, typeUrl: String, value: ByteArray, feeLimit: Long?
+        type: Long, typeUrl: String, value: ByteArray, feeLimit: Long?, memo: ByteArray?
     ): ByteArray {
         require(refBytes.size == 2 && refHash.size == 8) { "Bad block reference" }
         val any = ld(1, typeUrl.toByteArray(Charsets.US_ASCII)) + ld(2, value)
         val contract = vi(1, type) + ld(2, any)
-        return ld(1, refBytes) + ld(4, refHash) + vi(8, expirationMs) + ld(11, contract) +
+        return ld(1, refBytes) + ld(4, refHash) + vi(8, expirationMs) +
+            (if (memo != null && memo.isNotEmpty()) ld(10, memo) else ByteArray(0)) + ld(11, contract) +
             vi(14, timestampMs) + (if (feeLimit != null) vi(18, feeLimit) else ByteArray(0))
     }
 
@@ -170,6 +174,7 @@ object TronFee {
     const val DEFAULT_BANDWIDTH_PRICE_SUN = 1000L   // sun per byte
     const val DEFAULT_ENERGY_PRICE_SUN = 420L       // sun per energy unit
     const val DEFAULT_CREATE_ACCOUNT_SUN = 1_000_000L
+    const val DEFAULT_MEMO_FEE_SUN = 1_000_000L     // a transaction carrying a memo burns this much (network parameter)
     const val SUN_PER_TRX = 1_000_000L
     /** Hard ceiling for the fee_limit of a contract call (TRX burned for energy at most). */
     const val MAX_FEE_LIMIT_SUN = 200 * SUN_PER_TRX

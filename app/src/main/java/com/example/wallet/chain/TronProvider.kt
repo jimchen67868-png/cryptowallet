@@ -26,7 +26,9 @@ class TronProvider(
     private val apiBase: String = "https://nile.trongrid.io",
     override val isTestnet: Boolean = true,
     private val explorerTxUrl: String = "https://nile.tronscan.org/#/transaction/",
-    private val knownTokens: List<TokenInfo> = emptyList()
+    private val knownTokens: List<TokenInfo> = emptyList(),
+    /** THORChain swaps (mainnet only). */
+    private val thor: ThorSwaps? = null
 ) : ChainProvider {
 
     override val chain = Chain.TRX
@@ -93,7 +95,7 @@ class TronProvider(
 
     // ---- fees ----
 
-    private class Params(val bandwidthSun: Long, val energySun: Long, val createAccountSun: Long)
+    private class Params(val bandwidthSun: Long, val energySun: Long, val createAccountSun: Long, val memoSun: Long)
     private class Resources(val bandwidth: Long, val energy: Long)
 
     private fun chainParams(): Params {
@@ -109,7 +111,8 @@ class TronProvider(
         return Params(
             find("getTransactionFee", TronFee.DEFAULT_BANDWIDTH_PRICE_SUN),
             find("getEnergyFee", TronFee.DEFAULT_ENERGY_PRICE_SUN),
-            find("getCreateNewAccountFeeInSystemContract", TronFee.DEFAULT_CREATE_ACCOUNT_SUN)
+            find("getCreateNewAccountFeeInSystemContract", TronFee.DEFAULT_CREATE_ACCOUNT_SUN),
+            find("getMemoFee", TronFee.DEFAULT_MEMO_FEE_SUN)
         )
     }
 
@@ -123,20 +126,23 @@ class TronProvider(
     private fun post(path: String, body: JSONObject): String = Http.postJson("$apiBase$path", body.toString())
 
     override suspend fun estimateFee(address: String, to: String, amount: BigDecimal): BigDecimal =
-        withContext(Dispatchers.IO) {
-            val dest = TronAddress.decode(to) ?: throw IllegalArgumentException("Invalid address")
-            val sun = toSun(amount)
-            val p = chainParams()
-            val res = resources(address)
-            // Size of a transfer is constant for our encoding; build a dummy one to measure it.
-            val dummy = TronTx.transferRaw(ByteArray(2), ByteArray(8), 1L shl 40, 1L shl 40,
-                TronAddress.decode(address) ?: throw IllegalArgumentException("Invalid own address"), dest, sun)
-            var fee = TronFee.bandwidthSun(TronFee.bandwidthBytes(dummy.size), res.bandwidth, p.bandwidthSun)
-            if (isInactive(to)) fee += p.createAccountSun
-            val balance = TronParse.trxBalanceSun(account(address))
-            if (balance < sun + fee) throw IllegalStateException("Insufficient TRX (amount + network fee of about ${TronFee.sunToTrx(fee).toPlainString()} TRX)")
-            TronFee.sunToTrx(fee)
-        }
+        withContext(Dispatchers.IO) { TronFee.sunToTrx(transferFeeSun(address, to, toSun(amount), null)) }
+
+    /** Fee in sun for a TRX transfer (bandwidth, account creation, memo). Throws if the balance can't cover amount + fee. */
+    private fun transferFeeSun(address: String, to: String, sun: Long, memo: ByteArray?): Long {
+        val dest = TronAddress.decode(to) ?: throw IllegalArgumentException("Invalid address")
+        val p = chainParams()
+        val res = resources(address)
+        // Size of a transfer is constant for our encoding; build a dummy one to measure it.
+        val dummy = TronTx.transferRaw(ByteArray(2), ByteArray(8), 1L shl 40, 1L shl 40,
+            TronAddress.decode(address) ?: throw IllegalArgumentException("Invalid own address"), dest, sun, memo)
+        var fee = TronFee.bandwidthSun(TronFee.bandwidthBytes(dummy.size), res.bandwidth, p.bandwidthSun)
+        if (isInactive(to)) fee += p.createAccountSun
+        if (memo != null && memo.isNotEmpty()) fee += p.memoSun
+        val balance = TronParse.trxBalanceSun(account(address))
+        if (balance < sun + fee) throw IllegalStateException("Insufficient TRX (amount + network fee of about ${TronFee.sunToTrx(fee).toPlainString()} TRX)")
+        return fee
+    }
 
     /** True if [address] has never been activated on chain (a first transfer then burns an extra account-creation fee). */
     private fun isInactive(address: String): Boolean = TronParse.account(JSONObject(Http.get("$apiBase/v1/accounts/$address"))) == null
@@ -186,7 +192,9 @@ class TronProvider(
 
     // ---- sending ----
 
-    override suspend fun send(seed: ByteArray, to: String, amount: BigDecimal): String = withContext(Dispatchers.IO) {
+    override suspend fun send(seed: ByteArray, to: String, amount: BigDecimal): String = sendInternal(seed, to, amount, null)
+
+    private suspend fun sendInternal(seed: ByteArray, to: String, amount: BigDecimal, memo: ByteArray?): String = withContext(Dispatchers.IO) {
         val kp = keyPair(seed)
         val owner = TronAddress.fromKeyPair(kp)
         val dest = TronAddress.decode(to) ?: throw IllegalArgumentException("Invalid address")
@@ -194,10 +202,39 @@ class TronProvider(
         val sun = toSun(amount)
         val me = TronAddress.toBase58(owner)
         // Fail early (and with a readable message) if the balance can't cover amount + fee.
-        estimateFee(me, to, amount)
+        transferFeeSun(me, to, sun, memo)
         val ref = latestBlock()
-        val raw = TronTx.transferRaw(ref.bytes, ref.hash, ref.expirationMs, ref.timestampMs, owner, dest, sun)
+        val raw = TronTx.transferRaw(ref.bytes, ref.hash, ref.expirationMs, ref.timestampMs, owner, dest, sun, memo)
         broadcast(kp, raw)
+    }
+
+    // ---- THORChain swaps (mainnet) ----
+
+    override val supportsBridge: Boolean get() = thor != null
+
+    override fun bridgeDestinations(): List<Chain> = thor?.destinationsFrom(chain).orEmpty()
+
+    override val bridgeProviderNote: String? get() = if (thor != null) ThorSwaps.PROVIDER_NOTE else null
+
+    override suspend fun quoteBridgeTo(
+        userAddress: String, from: SwapAsset, dest: Chain, destAddress: String, amount: BigDecimal
+    ): BridgeQuote = withContext(Dispatchers.IO) {
+        val t = thor ?: throw UnsupportedOperationException("Swaps are not supported on ${chain.label}")
+        require(from.id == null) { "Only TRX itself can be swapped to another network here (not USDT)" }
+        val sun = toSun(amount)
+        val plan = t.plan(chain, dest, destAddress, BigInteger.valueOf(sun).multiply(BigInteger.valueOf(100))) // 1e8 units
+        TronAddress.decode(plan.vault) ?: throw IllegalStateException("THORChain gave an address this wallet can't pay")
+        val fee = transferFeeSun(userAddress, plan.vault, sun, plan.memo.toByteArray(Charsets.US_ASCII))
+        t.toBridgeQuote(plan, from, BigInteger.valueOf(fee), nativeDecimals)
+    }
+
+    override suspend fun executeBridge(seed: ByteArray, quote: BridgeQuote): SwapResult = withContext(Dispatchers.IO) {
+        val t = thor ?: throw UnsupportedOperationException("Swaps are not supported on ${chain.label}")
+        val plan = quote.payload as? ThorPlan ?: throw IllegalStateException("Not a THORChain quote")
+        check(plan.from == chain && quote.chain == chain) { "Quote is for another network" }
+        t.recheck(plan)
+        val txid = sendInternal(seed, plan.vault, BigDecimal(plan.amountIn).movePointLeft(8), plan.memo.toByteArray(Charsets.US_ASCII))
+        SwapResult(emptyList(), txid)
     }
 
     override suspend fun sendToken(seed: ByteArray, token: TokenBalance, to: String, amount: BigDecimal): String =
@@ -280,7 +317,7 @@ class TronProvider(
 
         fun mainnet() = TronProvider(
             apiBase = "https://api.trongrid.io", isTestnet = false,
-            explorerTxUrl = "https://tronscan.org/#/transaction/", knownTokens = MAINNET_TOKENS
+            explorerTxUrl = "https://tronscan.org/#/transaction/", knownTokens = MAINNET_TOKENS, thor = ThorSwaps()
         )
     }
 }

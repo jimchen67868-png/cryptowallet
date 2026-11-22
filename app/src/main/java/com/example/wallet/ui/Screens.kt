@@ -253,8 +253,11 @@ private fun HomeScreen(vm: WalletViewModel, activity: FragmentActivity) {
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Row {
-                                if (vm.providers.first { it.chain == acc.chain }.supportsSwap) {
+                                val prov = vm.providers.first { it.chain == acc.chain }
+                                if (prov.supportsSwap) {
                                     TextButton(onClick = { vm.goTo(Screen.Swap(acc.chain)) }) { Text("Swap") }
+                                } else if (prov.supportsBridge) {
+                                    TextButton(onClick = { vm.goTo(Screen.Bridge(acc.chain, null)) }) { Text("Swap") }
                                 }
                                 TextButton(onClick = { vm.openHistory(acc.chain) }) { Text("History") }
                             }
@@ -558,7 +561,7 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
     }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Move $symbol to another network", style = MaterialTheme.typography.headlineSmall)
+        Text(if (provider.bridgeProviderNote != null) "Swap $symbol to another network" else "Move $symbol to another network", style = MaterialTheme.typography.headlineSmall)
         Text("From: ${chain.label}" + (available?.let { "  (available ${it.plain()})" } ?: ""))
         Text("To network:")
         destinations.forEachIndexed { i, d ->
@@ -615,6 +618,8 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
                     "money; Relay limits test transfers to about $1. (2) The free CCIP-BnM test token between Sepolia and BNB testnet " +
                     "through Chainlink CCIP: the wallet builds the transaction itself and your address is inside it. Get CCIP-BnM with " +
                     "\"Get test CCIP-BnM\" on the home screen, and keep some ETH/BNB for the CCIP fee."
+            } else if (provider.bridgeProviderNote != null) {
+                provider.bridgeProviderNote!!
             } else {
                 "Your funds move between blockchains through LI.FI, routed over Across: both are third parties. It takes minutes and " +
                     "cannot be undone. The transaction comes from LI.FI, so the wallet decodes it and refuses to sign unless the " +
@@ -634,6 +639,7 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
                 Text(
                     "Send ${q.amountIn.plain()} $symbol on ${q.chain.label} to ${q.destChain.label}\n\n" +
                         "You receive about ${q.amountOut.plain()} ${q.outSymbol} on ${q.destChain.label}\n" +
+                        (q.destAddress?.let { "Arrives at your own address: $it\n" } ?: "") +
                         "Bridge fee: ${q.fee.plain()} $symbol (${q.feePercent}%)\n" +
                         (if (q.networkFeeRaw.signum() > 0) "Network fee, paid in ${q.networkFeeSymbol} on top: ${q.networkFee.plain()} ${q.networkFeeSymbol}\n" else "") +
                         "Estimated time: ${etaText(q.etaSeconds)}\n" +
@@ -648,7 +654,8 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
                             if (q.networkFeeRaw.signum() > 0) "\nTestnet only. Sent through Chainlink CCIP: your address is inside the transaction itself.\n"
                             else "\nTestnet only: Relay decides the recipient, not the transaction.\n"
                         } else "") +
-                        (if (q.networkFeeRaw.signum() > 0) "\nCCIP delivery can take many minutes. This cannot be undone."
+                        (if (q.note != null) "\n${q.note}"
+                        else if (q.networkFeeRaw.signum() > 0) "\nCCIP delivery can take many minutes. This cannot be undone."
                         else "\nIf the transfer is not filled in time, it is refunded to you on ${q.chain.label}. This cannot be undone.")
                 )
             },

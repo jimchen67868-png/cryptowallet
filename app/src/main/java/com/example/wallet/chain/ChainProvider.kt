@@ -105,6 +105,16 @@ interface ChainProvider {
         throw UnsupportedOperationException("Bridging is not supported on ${chain.label}")
     }
 
+    /**
+     * Like [quoteBridge] for providers that must name the receiving address on [dest] (THORChain). The default ignores it,
+     * so the EVM bridges are unchanged. [destAddress] is always one of this wallet's own addresses.
+     */
+    suspend fun quoteBridgeTo(userAddress: String, from: SwapAsset, dest: Chain, destAddress: String, amount: BigDecimal): BridgeQuote =
+        quoteBridge(userAddress, from, dest, amount)
+
+    /** One-paragraph description of the bridge provider for the bridge screen, or null for the default (LI.FI). */
+    val bridgeProviderNote: String? get() = null
+
     suspend fun executeBridge(seed: ByteArray, quote: BridgeQuote): SwapResult {
         throw UnsupportedOperationException("Bridging is not supported on ${chain.label}")
     }

@@ -143,6 +143,16 @@ class TronTest {
         try { TronTx.blockReference("00", 0); fail("short id must be rejected") } catch (e: IllegalArgumentException) { }
     }
 
+    @Test fun transferWithMemo_putsMemoInField10_beforeTheContract() {
+        val memo = "=:BTC.BTC:bc1qjmxnz78nmc8nq77wuxh25n2es7rzm5c2rkk4wh:1234567".toByteArray()
+        val withMemo = TronTx.transferRaw("2927".unhex(), "939ece39d08a7abe".unhex(), 1777447527000L, 1777447470038L, owner, dest, 1_000_000, memo)
+        assertEquals("0a0229272208939ece39d08a7abe40d8c483c1dd33523c3d3a4254432e4254433a626331716a6d786e7a37386e6d63386e7137377775786832356e32657337727a6d356332726b6b3477683a313233343536375a67080112630a2d747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e5472616e73666572436f6e747261637412320a1541c8599111f29c1e1e061265b4af93ea1f274ad78a12154192ad11c1bf16b3b14b0bd6b5c7e2db73a0b5e83a18c0843d70d68780c1dd33", withMemo.hex())
+        assertEquals("1f92ed35e7d405208c3f47145c400dea1e57d4702b3116deab6747732eee7917", TronTx.txId(withMemo).hex())
+        val without = TronTx.transferRaw("2927".unhex(), "939ece39d08a7abe".unhex(), 1777447527000L, 1777447470038L, owner, dest, 1_000_000, null)
+        assertEquals(without.hex(), TronTx.transferRaw("2927".unhex(), "939ece39d08a7abe".unhex(), 1777447527000L, 1777447470038L, owner, dest, 1_000_000, ByteArray(0)).hex())
+        assertTrue("memo adds its bytes plus a 2-byte header", withMemo.size == without.size + memo.size + 2)
+    }
+
     // ---- fees ----
 
     @Test fun fees_burnOnlyWhatTheAccountLacks() {

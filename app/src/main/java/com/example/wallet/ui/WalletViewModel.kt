@@ -458,7 +458,8 @@ class WalletViewModel(
     /** Curated assets on [dest] that the bridged funds can be swapped into (never the bridged asset itself). */
     fun swapTargetsAfterBridge(chain: Chain, from: TokenBalance?, dest: Chain): List<SwapAsset> = try {
         val fromAsset = SwapAsset(from?.id, from?.symbol ?: chain.symbol, from?.decimals ?: 18)
-        val cands = bridgeCandidates(fromAsset, chain, dest)
+        // THORChain routes (Litecoin, Tron) deliver the native coin straight to your address: no swap-on-arrival step.
+        val cands = if (netProvider(chain).bridgeProviderNote != null) emptyList() else bridgeCandidates(fromAsset, chain, dest)
         if (cands.isEmpty()) emptyList()
         else {
             val keys = cands.map { SwapGuard.tokenKey(it) }.toSet()
@@ -483,10 +484,12 @@ class WalletViewModel(
         val balance = from?.balance ?: acc.balance
         if (balance != null && amount > balance) { message = "Amount exceeds your ${fromAsset.symbol} balance"; return }
         limitError(chain, from?.id, amount)?.let { message = it; return }
+        val destAddress = accounts.firstOrNull { it.chain == dest }?.address
+        if (destAddress == null) { message = "No ${dest.label} address in this wallet"; return }
         sending = true
         viewModelScope.launch(guard) {
             runCatching {
-                val q = provider.quoteBridge(acc.address, fromAsset, dest, amount)
+                val q = provider.quoteBridgeTo(acc.address, fromAsset, dest, destAddress, amount)
                 q to thenSwapTo?.let { buildCombo(q, it, acc.address) }
             }
                 .onSuccess { (q, combo) -> pendingBridge = q; pendingCombo = combo }

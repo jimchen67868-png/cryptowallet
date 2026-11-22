@@ -122,3 +122,13 @@ print("LTC testnet m/84'/1'/0'/0/0:", segwit_encode("tltc", 0, hash160(ser_pub(m
 def p2pkh(ver, h): return b58check(bytes([ver]) + h)
 print("LTC P2PKH:", p2pkh(0x30, pl), " P2SH(M):", b58check(bytes([0x32]) + pl), " P2SH(3):", b58check(bytes([0x05]) + pl))
 print("tLTC P2SH(Q):", b58check(bytes([0x3a]) + pl), " P2SH(2):", b58check(bytes([0xc4]) + pl))
+
+# ---------- Tron memo (raw_data.data = field 10, between expiration and contract) ----------
+memo = b"=:BTC.BTC:bc1qjmxnz78nmc8nq77wuxh25n2es7rzm5c2rkk4wh:1234567"
+tc_ = ld(0x0a, me) + ld(0x12, to) + vi(0x18, 1000000)
+any_ = ld(0x0a, b"type.googleapis.com/protocol.TransferContract") + ld(0x12, tc_)
+contract_ = vi(0x08, 1) + ld(0x12, any_)
+raw_memo = ld(0x0a, bytes.fromhex("2927")) + ld(0x22, bytes.fromhex("939ece39d08a7abe")) + vi(0x40, 1777447527000) \
+    + ld(0x52, memo) + ld(0x5a, contract_) + vi(0x70, 1777447470038)
+print("transfer raw_data with memo:", raw_memo.hex())
+print("memo txID:", sha256(raw_memo).hex())
