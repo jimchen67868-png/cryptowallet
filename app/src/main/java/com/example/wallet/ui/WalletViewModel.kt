@@ -109,6 +109,8 @@ class WalletViewModel(
         private set
     var pendingSwap by mutableStateOf<SwapQuote?>(null)
         private set
+    var dryRunReport by mutableStateOf<String?>(null)
+        private set
     var pendingBridge by mutableStateOf<BridgeQuote?>(null)
         private set
     var pendingCombo by mutableStateOf<ComboPlan?>(null)
@@ -529,6 +531,20 @@ class WalletViewModel(
     }
 
     fun cancelBridge() { pendingBridge = null; pendingCombo = null }
+
+    /** Re-checks the pending quote and shows what would be sent, without signing or sending anything. */
+    fun dryRunBridge() {
+        val q = pendingBridge ?: return
+        val addr = accounts.firstOrNull { it.chain == q.chain }?.address ?: return
+        sending = true
+        viewModelScope.launch(guard) {
+            dryRunReport = runCatching { netProvider(q.chain).dryRunBridge(addr, q) }
+                .getOrElse { "DRY RUN FAILED. Nothing was sent.\n\n${it.message ?: it.javaClass.simpleName}" }
+            sending = false
+        }
+    }
+
+    fun closeDryRun() { dryRunReport = null }
 
     /** Mints the network's free test token (testnets), e.g. CCIP-BnM, so the CCIP bridge can be tried. */
     fun getFaucetToken(activity: FragmentActivity, chain: Chain) {

@@ -1,0 +1,87 @@
+== API host: https://train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET / -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET /health -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET /networks -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET /api/v1/networks -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET /api/networks -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET /v1/networks -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET /api/v1/routes -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET /api/v1/orders/ -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET /swagger/index.html -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET /swagger/v1/swagger.json -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET /openapi.json -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET /api/v1/openapi.json -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+tools/capture_train_api.sh: 12: cannot open /data/data/com.termux/files/usr/tmp/train_api/body.txt: No such file
+--- GET /docs -> HTTP 000 (0 bytes)
+
+curl: (6) Could not resolve host: train-solver-station.dev.lb.layerswap.cloud
+
+== if an OpenAPI/Swagger file exists, list its paths
+
+== testnet web app: API host and request shapes
+chunks: 38
+-- hosts:
+https://app.train.tech/symbol.png
+https://docs.train.tech/protocol/atomic-swaps-secret_gen
+https://faro.dev.lb.layerswap.cloud:12347/collect
+https://github.com/TrainProtocol/app
+https://raw.githubusercontent.com/TrainProtocol/icons/main/tokens/
+https://t.me/trainprotocol
+https://testnet.train.tech
+https://train-solver-station.dev.lb.layerswap.cloud
+https://train.tech/
+https://v8-docs.layerswap.io/protocol/introduction
+https://x.com/trainprotocol
+-- context around the API calls (trimmed):
+[/api/v1/orders]
+ddress:s,hashlock:a,enabled:n,store:i,onFailed:o}=e,l=(0,t.useRef)(o);l.current=o;let c=(0,t.useRef)([]);(0,t.useEffect)(()=>{c.current=[]},[s,a]);let d=a?`${r}/api/v1/orders/${encodeURIComponent(a)}/stream${s?`?solverAddress=${encodeURIComponent(s)}`:""}`:null;!function(e,r){let{enabled:s,onEvent:a,onError:n,maxRetries:i=5,EventSourceClass:o}=r,l=(0,t.useRef)(a),c=(0,t.useRef)(n);l.current=
+[/reveal-secret]
+onent(e)}${r}`)).data}async revealSecret(e,t,r){let a=r?`?solverAddress=${encodeURIComponent(r)}`:"";await this.request("POST",`/orders/${encodeURIComponent(e)}/reveal-secret${a}`,{secret:t})}async getQuote(e){let{includeReward:t=!0,sourceTokenContract:r,destinationTokenContract:a,...s}=e,n=new URLSearchParams({...s,includeReward:String(t)});r&&n.set("sourceTokenContract",r),a&&n.set("destin
+[/networks]
+Client: baseUrl is required. Set NEXT_PUBLIC_TRAIN_API env var.");this.baseUrl=e.baseUrl.replace(/\/$/,"")}async getNetworks(){return(await this.request("GET","/networks")).data??[]}async getPrices(){return(await this.request("GET","/prices")).data??{}}async getOrder(e,t){let r=t?`?solverAddress=${encodeURIComponent(t)}`:"";return(await this.request("GET",`/orders/${encodeURIComponent(e
+[/quote]
+ms({...s,includeReward:String(t)});r&&n.set("sourceTokenContract",r),a&&n.set("destinationTokenContract",a);let i=n.toString();return(await this.request("GET",`/quote?${i}`)).data}async request(e,r,a){let s=`${this.baseUrl}/api/v1${r}`,n=await fetch(s,{method:e,headers:{"Content-Type":"application/json"},...void 0!==a?{body:JSON.stringify(a)}:{}});if(!n.ok){let a=await n.text().catch
+[X-API-Key]
+[x-api-key]
+ding"]="gzip");let y=Object.assign({method:"POST",headers:Object.assign(Object.assign(Object.assign(Object.assign({"Content-Type":"application/json"},b),h),a?{"x-api-key":a}:{}),t?{"x-faro-session-id":t}:{}),body:g},null!=f?f:{});return this.fetchWithKeepaliveRetry(o,y,m,u).catch(e=>{this.logError("Failed sending payload to the receiver\n",JSON.parse(n),e)})}))}catch(e){this.logError(e)
+[Authorization]
+e4.ns64("unixTimestamp"),e4.ns64("epoch"),ro("custodian")],e))()])},Authorize:{index:1,layout:e4.struct([e4.u32("instruction"),ro("newAuthorized"),e4.u32("stakeAuthorizationType")])},Delegate:{index:2,layout:e4.struct([e4.u32("instruction")])},Split:{index:3,layout:e4.struct([e4.u32("instruction"),e4.ns64("lamports")])},Withdraw:{index:4,layout:e4.struct([e4.u32("instruction"),e4.ns64("lamp
+},Merge:{index:7,layout:e4.struct([e4.u32("instruction")])},AuthorizeWithSeed:{index:8,layout:e4.struct([e4.u32("instruction"),ro("newAuthorized"),e4.u32("stakeAuthorizationType"),ra("authoritySeed"),ro("authorityOwner")])}}),nq=Object.freeze({Staker:{index:0},Withdrawer:{index:1}});class nW{static initialize(e){let{stakePubkey:t,authorized:r,lockup:i}=e,n=i||nz.default,s=rU(nK.Initialize,{
+!1},{pubkey:r,isSigner:!0,isWritable:!1}],programId:this.programId,data:n})}static authorize(e){let{stakePubkey:t,authorizedPubkey:r,newAuthorizedPubkey:i,stakeAuthorizationType:n,custodianPubkey:s}=e,o=rU(nK.Authorize,{newAuthorized:t3(i.toBuffer()),stakeAuthorizationType:n.index}),a=[{pubkey:t,isSigner:!1,isWritable:!0},{pubkey:rv,isSigner:!1,isWritable:!0},{pubkey:r,isSigner:!0,isWritabl
+s:a,programId:this.programId,data:o})}static authorizeWithSeed(e){let{stakePubkey:t,authorityBase:r,authoritySeed:i,authorityOwner:n,newAuthorizedPubkey:s,stakeAuthorizationType:o,custodianPubkey:a}=e,c=rU(nK.AuthorizeWithSeed,{newAuthorized:t3(s.toBuffer()),stakeAuthorizationType:o.index,authoritySeed:i,authorityOwner:t3(n.toBuffer())}),u=[{pubkey:t,isSigner:!1,isWritable:!0},{pubkey:r,isS

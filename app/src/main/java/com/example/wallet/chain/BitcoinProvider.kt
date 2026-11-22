@@ -205,6 +205,24 @@ class BitcoinProvider(
         t.toBridgeQuote(plan, from, BigInteger.valueOf(fee), nativeDecimals)
     }
 
+    override suspend fun dryRunBridge(userAddress: String, quote: BridgeQuote): String = withContext(Dispatchers.IO) {
+        val t = thor ?: throw UnsupportedOperationException("Swaps are not supported on ${chain.label}")
+        val plan = quote.payload as? ThorPlan ?: throw IllegalStateException("Not a THORChain quote")
+        check(plan.from == chain && quote.chain == chain) { "Quote is for another network" }
+        val report = t.dryRunReport(plan)
+        val vaultScript = scriptForAddress(plan.vault) ?: throw IllegalStateException("This wallet can't pay THORChain's vault address")
+        val memo = plan.memo.toByteArray(Charsets.US_ASCII)
+        check(memo.size <= ThorMemo.MAX_BYTES) { "Memo too long" }
+        val sats = plan.amountIn.longValueExact()
+        val sel = CoinSelection.select(fetchUtxos(userAddress), sats, vaultScript.size, feeRate(), dust, BitcoinTx.opReturnOutputBytes(memo))
+        report + "\nTransaction that would be built:\n" +
+            "- ${sel.inputs.size} input(s) from your address\n" +
+            "- output 1: $sats sats to the vault\n" +
+            (if (sel.change > 0) "- output 2: ${sel.change} sats change back to you\n" else "- no change output (remainder goes to the miner)\n") +
+            "- last output: OP_RETURN with the memo (${memo.size} bytes, limit ${ThorMemo.MAX_BYTES})\n" +
+            "- miner fee ${sel.fee} sats"
+    }
+
     override suspend fun executeBridge(seed: ByteArray, quote: BridgeQuote): SwapResult = withContext(Dispatchers.IO) {
         val t = thor ?: throw UnsupportedOperationException("Swaps are not supported on ${chain.label}")
         val plan = quote.payload as? ThorPlan ?: throw IllegalStateException("Not a THORChain quote")

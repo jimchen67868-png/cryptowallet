@@ -660,7 +660,21 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
                 )
             },
             confirmButton = { TextButton(onClick = { vm.confirmBridge(activity) }) { Text("Bridge") } },
-            dismissButton = { TextButton(onClick = vm::cancelBridge) { Text("Cancel") } }
+            dismissButton = {
+                Row {
+                    if (q.payload != null) TextButton(onClick = vm::dryRunBridge, enabled = !vm.sending) { Text("Dry run") }
+                    TextButton(onClick = vm::cancelBridge) { Text("Cancel") }
+                }
+            }
+        )
+    }
+
+    vm.dryRunReport?.let { report ->
+        AlertDialog(
+            onDismissRequest = vm::closeDryRun,
+            title = { Text("Dry run") },
+            text = { Text(report, modifier = Modifier.verticalScroll(rememberScrollState()), style = MaterialTheme.typography.bodySmall) },
+            confirmButton = { TextButton(onClick = vm::closeDryRun) { Text("OK") } }
         )
     }
 }

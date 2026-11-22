@@ -226,6 +226,25 @@ class ThorSwaps(
         if (inbound.address != plan.vault) throw IllegalStateException("THORChain's vault changed since the quote. Get a new quote.")
     }
 
+    /** The part of a dry run that is the same for every source chain. Re-runs the vault check; throws if it fails. */
+    fun dryRunReport(plan: ThorPlan): String {
+        recheck(plan)
+        fun amt(v: BigInteger) = BigDecimal(v).movePointLeft(8).stripTrailingZeros().toPlainString()
+        val left = plan.expirySec - clockSec()
+        return "THORChain DRY RUN, nothing was signed or sent.\n\n" +
+            "Checks passed just now:\n" +
+            "- vault address agreed by at least ${ThorQuorum.MIN_NODES} independent nodes\n" +
+            "- chain not paused, quote not expired (${left / 60} min ${left % 60} s left)\n" +
+            "- amount above the quote's minimum, fees within ${ThorGuard.MAX_FEE_PERCENT}%\n\n" +
+            "Vault: ${plan.vault}\n" +
+            "Memo (${plan.memo.length} bytes): ${plan.memo}\n" +
+            "Your destination (${plan.dest.label}): ${plan.destAddress}\n" +
+            "Send: ${amt(plan.amountIn)} ${plan.from.symbol}\n" +
+            "Expected output: ${amt(plan.expectedOut)} ${plan.dest.symbol}\n" +
+            "Minimum output (refund below this): ${amt(plan.minOut)} ${plan.dest.symbol}\n" +
+            "THORChain fees (in ${plan.dest.symbol}): ${amt(plan.feesTotal)}\n"
+    }
+
     fun toBridgeQuote(plan: ThorPlan, from: SwapAsset, minerFeeRaw: BigInteger, nativeDecimals: Int): BridgeQuote {
         // THORChain reports fees in the OUTPUT asset: express them as a share of the input for display.
         val gross = plan.expectedOut + plan.feesTotal

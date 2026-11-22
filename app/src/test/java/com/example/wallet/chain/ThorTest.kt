@@ -191,6 +191,18 @@ class ThorTest {
         assertTrue(bq.note!!.contains("refunds"))
     }
 
+    @Test fun dryRunReport_showsWhatWouldBeSent_andFailsIfTheVaultChanged() {
+        val plan = swaps(FakeApi(inbound() to null, quote())).plan(Chain.LTC, Chain.BTC, btcDest, big("1000000"))
+        val text = swaps(FakeApi(inbound() to null, quote())).dryRunReport(plan)
+        assertTrue(text.contains("nothing was signed or sent"))
+        assertTrue(text.contains(vault))
+        assertTrue(text.contains(plan.memo))
+        assertTrue(text.contains(btcDest))
+        assertTrue(text.contains("0.01 LTC"))          // 1_000_000 units of 1e-8
+        assertTrue(text.contains("0.04950000".trimEnd('0')) || text.contains("0.0495 BTC"))
+        try { swaps(FakeApi(inbound("ltc1qrotated") to null, quote())).dryRunReport(plan); fail() } catch (e: IllegalStateException) { }
+    }
+
     private fun assertSame(a: Any?, b: Any?) = org.junit.Assert.assertSame(a, b)
 
     // ---- configuration ----

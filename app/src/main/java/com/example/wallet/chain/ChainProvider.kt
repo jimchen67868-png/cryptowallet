@@ -112,6 +112,13 @@ interface ChainProvider {
     suspend fun quoteBridgeTo(userAddress: String, from: SwapAsset, dest: Chain, destAddress: String, amount: BigDecimal): BridgeQuote =
         quoteBridge(userAddress, from, dest, amount)
 
+    /**
+     * Dry run of a quote: re-checks everything that can be checked and builds what would be sent, but signs and sends
+     * nothing and needs no seed. Returns a human-readable report. Throws if any check fails.
+     */
+    suspend fun dryRunBridge(userAddress: String, quote: BridgeQuote): String =
+        "A dry run is not available for this route."
+
     /** One-paragraph description of the bridge provider for the bridge screen, or null for the default (LI.FI). */
     val bridgeProviderNote: String? get() = null
 

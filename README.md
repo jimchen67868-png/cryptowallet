@@ -204,6 +204,10 @@ How it is made safe against a bad API (the vault address and memo decide where f
 - minimum output is 1% under the quote; if the price moves more, or the swap fails, THORChain refunds the input minus fees.
 Litecoin: three outputs (vault, change, OP_RETURN memo, max 80 bytes). Tron: memo in `raw_data.data`; Tron burns an extra network
 memo fee (read from the network, shown in the fee line).
+**Dry run (no send):** in the swap confirmation, **Dry run** re-checks the vault with the nodes, expiry and fees, and shows the exact vault,
+memo, minimum output and the transaction that would be built (Litecoin: inputs, change, OP_RETURN, miner fee; Tron: transfer, memo
+field, network fee, balance check). It signs and sends nothing and needs no fingerprint/PIN. Use it first: it exercises the live THORChain API and
+every guard at zero cost.
 **Not run live from the dev environment.** The THORNode JSON shapes come from THORChain's docs; the Tron memo placement
 (`raw_data.data`) follows how other wallets and THORChain's TRON client do it but was not confirmed against a live swap. Reported
 during 2026: THORChain had paused some chains and had TRON vault-observation issues, so a route may be unavailable (the app then

@@ -232,6 +232,22 @@ class TronProvider(
         t.toBridgeQuote(plan, from, BigInteger.valueOf(fee), nativeDecimals)
     }
 
+    override suspend fun dryRunBridge(userAddress: String, quote: BridgeQuote): String = withContext(Dispatchers.IO) {
+        val t = thor ?: throw UnsupportedOperationException("Swaps are not supported on ${chain.label}")
+        val plan = quote.payload as? ThorPlan ?: throw IllegalStateException("Not a THORChain quote")
+        check(plan.from == chain && quote.chain == chain) { "Quote is for another network" }
+        val report = t.dryRunReport(plan)
+        TronAddress.decode(plan.vault) ?: throw IllegalStateException("This wallet can't pay THORChain's vault address")
+        val sun = plan.amountIn.divide(BigInteger.valueOf(100)).longValueExact()
+        val memo = plan.memo.toByteArray(Charsets.US_ASCII)
+        val fee = transferFeeSun(userAddress, plan.vault, sun, memo)
+        report + "\nTransaction that would be built:\n" +
+            "- TRX transfer of ${TronFee.sunToTrx(sun).toPlainString()} TRX to the vault\n" +
+            "- memo in the transaction's data field (${memo.size} bytes)\n" +
+            "- network fee about ${TronFee.sunToTrx(fee).toPlainString()} TRX (bandwidth, memo fee" + "${if (isInactive(plan.vault)) ", vault activation" else ""})\n" +
+            "- your TRX balance covers the amount plus this fee"
+    }
+
     override suspend fun executeBridge(seed: ByteArray, quote: BridgeQuote): SwapResult = withContext(Dispatchers.IO) {
         val t = thor ?: throw UnsupportedOperationException("Swaps are not supported on ${chain.label}")
         val plan = quote.payload as? ThorPlan ?: throw IllegalStateException("Not a THORChain quote")
