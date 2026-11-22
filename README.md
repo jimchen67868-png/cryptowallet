@@ -232,6 +232,14 @@ If there is none, the quote says "No usable SunSwap V2 pool found" and lists wha
 cross-chain ones above.
 Verified here: selectors (keccak) and calldata against an independent Python encoder. **Not run live.**
 
+### Testnet cross-chain for Tron (research status)
+THORChain and the other bridges here have no Tron/Litecoin testnet. The one candidate found is **TRAIN Protocol** (atomic swaps locked by a
+secret, filled by market makers): its official deployment list has contracts on Tron **Nile** (`Train` TRooTQxWa3pgP6oA5QiyASxGKcRFRKY8k9)
+and on Sepolia, Base Sepolia, Arbitrum Sepolia, OP Sepolia, BSC testnet (`0x265978c3e2E5dB9C3Ea665cC40C5925A5fc13Ee8`); the contracts are not
+externally audited. **Not built**: the Station API (quotes, solver address, revealing the secret) is not documented publicly, GitHub's
+SDK source can't be read automatically, and the solver gateway uses scoped API keys (test keys for testnet), so keyless access is unconfirmed.
+`tools/capture_train.sh` reads the public web app to find the API address and endpoint names; paste its output to continue.
+
 ## What works
 - Create / import wallet, backup confirmation, biometric/PIN unlock
 - Mnemonic encrypted with an AES-256-GCM key in the Android Keystore; seed kept in memory only while unlocked and wiped when the app is backgrounded
