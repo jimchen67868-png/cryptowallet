@@ -221,15 +221,15 @@ class ThorTest {
 
     @Test fun onlyMainnetLitecoinAndTronOfferSwaps() {
         assertTrue(BitcoinProvider.litecoin().supportsBridge)
-        assertEquals(listOf(Chain.BTC, Chain.ETH, Chain.BASE, Chain.TRX), BitcoinProvider.litecoin().bridgeDestinations())
+        assertEquals(listOf(Chain.BTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.TRX), BitcoinProvider.litecoin().bridgeDestinations())
         assertFalse(BitcoinProvider.litecoin(testnet = true).supportsBridge)
         assertFalse(BitcoinProvider().supportsBridge)       // Bitcoin testnet: no THORChain testnet
         val btcMain = BitcoinProvider(apiBase = "https://mempool.space/api", hrp = "bc", coinType = 0, p2pkhVersion = 0x00,
             p2shVersion = 0x05, explorerTxUrl = "https://mempool.space/tx/", thor = ThorSwaps())
         assertTrue(btcMain.supportsBridge)
-        assertEquals(listOf(Chain.LTC, Chain.ETH, Chain.BASE, Chain.TRX), btcMain.bridgeDestinations())
+        assertEquals(listOf(Chain.LTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.TRX), btcMain.bridgeDestinations())
         assertTrue(TronProvider.mainnet().supportsBridge)
-        assertEquals(listOf(Chain.LTC, Chain.BTC, Chain.ETH, Chain.BASE), TronProvider.mainnet().bridgeDestinations())
+        assertEquals(listOf(Chain.LTC, Chain.BTC, Chain.ETH, Chain.BASE, Chain.BNB), TronProvider.mainnet().bridgeDestinations())
         assertFalse(TronProvider().supportsBridge)
         assertNotNull(BitcoinProvider.litecoin().bridgeProviderNote)
         assertNull(BitcoinProvider().bridgeProviderNote)
@@ -299,6 +299,49 @@ class ThorTest {
         swaps(FakeApi(evmInbound() to null, evmQuote())).recheck(plan)
         try { swaps(FakeApi(evmInbound(r = "0x2222222222222222222222222222222222222222") to null, evmQuote())).recheck(plan); fail() } catch (e: IllegalStateException) { }
         assertTrue(swaps(FakeApi(evmInbound() to null, evmQuote())).dryRunReport(plan).contains("Router contract: $router"))
+    }
+
+    // ---- EVM tokens as the thing being sold ----
+
+    @Test fun tokenAssetNames() {
+        assertEquals("ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48", ThorAssets.evmTokenAsset(Chain.ETH, "USDC", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"))
+        assertEquals("BASE.USDC-0X833589FCD6EDB6E08F4C7C32D4F71B54BDA02913", ThorAssets.evmTokenAsset(Chain.BASE, "usdc", "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"))
+        assertEquals("BSC.USDT-0X55D398326F99059FF775485246999027B3197955", ThorAssets.evmTokenAsset(Chain.BNB, "USDT", "0x55d398326f99059fF775485246999027B3197955"))
+        assertNull("not an EVM chain", ThorAssets.evmTokenAsset(Chain.BTC, "USDC", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"))
+        assertNull("chain THORChain doesn't serve", ThorAssets.evmTokenAsset(Chain.ARB, "USDC", "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"))
+        assertNull("bad contract", ThorAssets.evmTokenAsset(Chain.ETH, "USDC", "0x1234"))
+        assertNull("bad symbol", ThorAssets.evmTokenAsset(Chain.ETH, "US DC", "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"))
+    }
+
+    @Test fun tokenUnits_exactBothWays() {
+        assertEquals(big("500000000"), ThorTokens.toUnits(big("5000000"), 6))              // 5 USDC -> 5.0 in 1e8 units
+        assertEquals(big("5000000"), ThorTokens.fromUnits(big("500000000"), 6))
+        assertEquals(big("100000000"), ThorTokens.toUnits(BigInteger.TEN.pow(18), 18))     // 1 coin with 18 decimals
+        assertEquals(BigInteger.TEN.pow(18), ThorTokens.fromUnits(big("100000000"), 18))
+        assertEquals(big("1"), ThorTokens.toUnits(big("10000000000"), 18))                 // the smallest representable amount
+        try { ThorTokens.toUnits(big("1"), 18); fail() } catch (e: IllegalArgumentException) { }     // finer than 1e-8: refused, never rounded
+        try { ThorTokens.fromUnits(big("1"), 6); fail() } catch (e: IllegalArgumentException) { }    // 1e-8 of a 6-decimal token
+        try { ThorTokens.toUnits(BigInteger.ZERO, 6); fail() } catch (e: IllegalArgumentException) { }
+    }
+
+    @Test fun plan_usesTheTokenAssetForTheQuote_andCarriesTokenDetails() {
+        val api = FakeApi(evmInbound() to null, evmQuote())
+        val asset = "ETH.USDC-0XA0B86991C6218B36C1D19D4A2E9EB0CE3606EB48"
+        val plan = swaps(api).plan(Chain.ETH, Chain.BTC, evmDest, big("500000000"), asset, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", 6)
+        assertEquals(asset, api.asked!![0])
+        assertEquals("500000000", api.asked!![2])
+        assertEquals("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", plan.tokenAddress)
+        assertEquals(6, plan.tokenDecimals)
+        assertTrue(swaps(FakeApi(evmInbound() to null, evmQuote())).dryRunReport(plan).contains("token 0xA0b86991"))
+    }
+
+    @Test fun routerCalldata_forAToken_putsTheTokenInTheAssetSlot() {
+        val usdc = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        val data = ThorRouter.depositWithExpiry(evmVault, big("5000000"), "=:BTC.BTC:x:1", 1800000900L, usdc)
+        assertTrue(data.contains(usdc.removePrefix("0x").lowercase()))
+        assertTrue(data.startsWith("0x44bc937b"))
+        assertFalse("the native asset slot is not used", ThorRouter.depositWithExpiry(evmVault, big("5000000"), "=:BTC.BTC:x:1", 1800000900L) == data)
+        try { ThorRouter.depositWithExpiry(evmVault, big("5"), "=:BTC.BTC:x:1", 1L, "usdc"); fail() } catch (e: IllegalArgumentException) { }
     }
 
     // ---- OP_RETURN and coin selection ----

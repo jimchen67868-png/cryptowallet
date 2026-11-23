@@ -31,17 +31,48 @@ object ThorAssets {
 
     /** What each source can deliver to. Native coins only; EVM outputs go to the wallet's own EVM address. */
     val DESTINATIONS: Map<Chain, List<Chain>> = mapOf(
-        Chain.BTC to listOf(Chain.LTC, Chain.ETH, Chain.BASE, Chain.TRX),
-        Chain.LTC to listOf(Chain.BTC, Chain.ETH, Chain.BASE, Chain.TRX),
-        Chain.TRX to listOf(Chain.LTC, Chain.BTC, Chain.ETH, Chain.BASE),
+        Chain.BTC to listOf(Chain.LTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.TRX),
+        Chain.LTC to listOf(Chain.BTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.TRX),
+        Chain.TRX to listOf(Chain.LTC, Chain.BTC, Chain.ETH, Chain.BASE, Chain.BNB),
         // EVM sources pay THORChain's router contract (native coin only for now): ETH, Base and BNB Chain
         Chain.ETH to listOf(Chain.BTC, Chain.LTC, Chain.TRX),
         Chain.BASE to listOf(Chain.BTC, Chain.LTC, Chain.TRX),
         Chain.BNB to listOf(Chain.BTC, Chain.LTC, Chain.TRX)
     )
 
+    /**
+     * THORChain's name for an ERC-20 on an EVM chain: `ETH.USDC-0XA0B8...` (symbol, dash, upper-cased contract). Null if the
+     * chain isn't one THORChain serves or the inputs are malformed. A pool for it may still not exist: the quote then fails.
+     */
+    fun evmTokenAsset(chain: Chain, symbol: String, contract: String): String? {
+        val vault = vaultChains[chain] ?: return null
+        if (!chain.isEvm || !Regex("[A-Za-z0-9]{2,10}").matches(symbol) || !Regex("0x[0-9a-fA-F]{40}").matches(contract)) return null
+        return "$vault.${symbol.uppercase()}-${contract.uppercase()}"
+    }
+
     fun asset(chain: Chain): String? = assets[chain]
     fun vaultChain(chain: Chain): String? = vaultChains[chain]
+}
+
+/** Conversions between a token's own raw units and THORChain's 1e8 units. Exact in both directions, or refused. */
+object ThorTokens {
+    private val E8 = BigInteger.TEN.pow(8)
+
+    fun toUnits(raw: BigInteger, decimals: Int): BigInteger {
+        require(raw.signum() > 0) { "Invalid amount" }
+        require(decimals in 0..36) { "Bad token decimals" }
+        val scale = BigInteger.TEN.pow(decimals)
+        val num = raw.multiply(E8)
+        require(num.mod(scale).signum() == 0) { "At most 8 decimal places are allowed for this swap" }
+        return num.divide(scale)
+    }
+
+    fun fromUnits(units: BigInteger, decimals: Int): BigInteger {
+        require(units.signum() > 0 && decimals in 0..36) { "Bad amount" }
+        val num = units.multiply(BigInteger.TEN.pow(decimals))
+        require(num.mod(E8).signum() == 0) { "Amount can't be expressed exactly in this token" }
+        return num.divide(E8)
+    }
 }
 
 /** THORChain swap memo: `=:ASSET:DESTINATION:MIN_OUT` (all amounts in THORChain's 1e8 units). */
@@ -177,7 +208,10 @@ class ThorPlan(
     val etaSeconds: Long,
     val destAddress: String,
     /** EVM sources: the router contract to call (verified on several nodes); empty for Bitcoin-family and Tron. */
-    val router: String = ""
+    val router: String = "",
+    /** EVM token sources: the ERC-20 being sold and its decimals (null = the chain's native coin). */
+    val tokenAddress: String? = null,
+    val tokenDecimals: Int = 18
 )
 
 /** THORNode REST API (keyless). Several independent endpoints so that no single one can choose the vault. */
@@ -221,9 +255,12 @@ class ThorSwaps(
     fun destinationsFrom(chain: Chain): List<Chain> = ThorAssets.DESTINATIONS[chain].orEmpty()
 
     /** Blocking (network). Throws with a user-facing message when the swap can't be made safely. */
-    fun plan(from: Chain, dest: Chain, destAddress: String, amountIn: BigInteger): ThorPlan {
+    fun plan(
+        from: Chain, dest: Chain, destAddress: String, amountIn: BigInteger,
+        tokenAsset: String? = null, tokenAddress: String? = null, tokenDecimals: Int = 18
+    ): ThorPlan {
         require(dest in destinationsFrom(from)) { "${from.label} can't be swapped to ${dest.label} here" }
-        val fromAsset = ThorAssets.asset(from) ?: throw IllegalArgumentException("Unsupported network")
+        val fromAsset = tokenAsset ?: ThorAssets.asset(from) ?: throw IllegalArgumentException("Unsupported network")
         val toAsset = ThorAssets.asset(dest) ?: throw IllegalArgumentException("Unsupported network")
         val vaultChain = ThorAssets.vaultChain(from) ?: throw IllegalArgumentException("Unsupported network")
         val (inbound, err) = api.inbound(vaultChain)
@@ -232,7 +269,7 @@ class ThorSwaps(
         ThorGuard.validate(q, inbound.address, destAddress, amountIn, clockSec(), inbound.router)?.let { throw IllegalStateException(it) }
         val minOut = ThorGuard.minOut(q.expectedOut)
         val memo = ThorMemo.swap(toAsset, destAddress, minOut) // built here; the API's memo was only compared
-        return ThorPlan(from, dest, inbound.address, memo, amountIn, q.expectedOut, minOut, q.feesTotal, q.expiry, q.etaSeconds, destAddress, inbound.router)
+        return ThorPlan(from, dest, inbound.address, memo, amountIn, q.expectedOut, minOut, q.feesTotal, q.expiry, q.etaSeconds, destAddress, inbound.router, tokenAddress, tokenDecimals)
     }
 
     /** Re-checks, right before signing, that the vault is still the agreed one and the plan has not expired. */
@@ -260,20 +297,20 @@ class ThorSwaps(
             (if (plan.router.isNotEmpty()) "Router contract: ${plan.router}\n" else "") +
             "Memo (${plan.memo.length} bytes): ${plan.memo}\n" +
             "Your destination (${plan.dest.label}): ${plan.destAddress}\n" +
-            "Send: ${amt(plan.amountIn)} ${plan.from.symbol}\n" +
+            "Send: ${amt(plan.amountIn)} ${if (plan.tokenAddress != null) "of token ${plan.tokenAddress}" else plan.from.symbol}\n" +
             "Expected output: ${amt(plan.expectedOut)} ${plan.dest.symbol}\n" +
             "Minimum output (refund below this): ${amt(plan.minOut)} ${plan.dest.symbol}\n" +
             "THORChain fees (in ${plan.dest.symbol}): ${amt(plan.feesTotal)}\n"
     }
 
-    fun toBridgeQuote(plan: ThorPlan, from: SwapAsset, minerFeeRaw: BigInteger, nativeDecimals: Int): BridgeQuote {
+    fun toBridgeQuote(plan: ThorPlan, from: SwapAsset, minerFeeRaw: BigInteger, nativeDecimals: Int, needsApproval: Boolean = false): BridgeQuote {
         // THORChain reports fees in the OUTPUT asset: express them as a share of the input for display.
         val gross = plan.expectedOut + plan.feesTotal
         val feeIn = if (gross.signum() == 0) BigInteger.ZERO else plan.amountIn.multiply(plan.feesTotal).divide(gross)
         return BridgeQuote(
             chain = plan.from, destChain = plan.dest, from = from,
             amountInRaw = plan.amountIn, amountOutRaw = plan.expectedOut, feeRaw = feeIn, decimals = 8,
-            outSymbol = plan.dest.symbol, etaSeconds = plan.etaSeconds, needsApproval = false,
+            outSymbol = plan.dest.symbol, etaSeconds = plan.etaSeconds, needsApproval = needsApproval,
             networkFeeRaw = minerFeeRaw, networkFeeSymbol = plan.from.symbol, networkFeeDecimals = nativeDecimals,
             payload = plan, destAddress = plan.destAddress,
             note = "Swapped by THORChain, a decentralised exchange network. The wallet sends your ${plan.from.symbol} to THORChain's " +
@@ -298,15 +335,16 @@ object ThorRouter {
     const val EXPIRY_SECONDS = 900L
 
     /** Hex calldata (with 0x). For the native coin the same amount must also be sent as the transaction value. */
-    fun depositWithExpiry(vault: String, amountWei: BigInteger, memo: String, expirySec: Long): String {
+    fun depositWithExpiry(vault: String, amountWei: BigInteger, memo: String, expirySec: Long, asset: String = NATIVE_ASSET): String {
         require(Regex("0x[0-9a-fA-F]{40}").matches(vault)) { "Bad vault address" }
+        require(Regex("0x[0-9a-fA-F]{40}").matches(asset)) { "Bad asset address" }
         require(amountWei.signum() > 0) { "Bad amount" }
         require(memo.isNotEmpty() && memo.all { it.code in 0x20..0x7e }) { "Bad memo" }
         val fn = org.web3j.abi.datatypes.Function(
             "depositWithExpiry",
             listOf(
                 org.web3j.abi.datatypes.Address(vault),
-                org.web3j.abi.datatypes.Address(NATIVE_ASSET),
+                org.web3j.abi.datatypes.Address(asset),
                 org.web3j.abi.datatypes.generated.Uint256(amountWei),
                 org.web3j.abi.datatypes.Utf8String(memo),
                 org.web3j.abi.datatypes.generated.Uint256(BigInteger.valueOf(expirySec))
