@@ -3,7 +3,7 @@ package com.example.wallet.chain
 import java.math.BigInteger
 
 /**
- * Bridging the CCIP-BnM TEST token between Sepolia and BNB Chain testnet with Chainlink CCIP, called directly on the
+ * Bridging the CCIP-BnM TEST token between Sepolia, BNB Chain testnet, Base Sepolia and Arbitrum Sepolia with Chainlink CCIP, called directly on the
  * on-chain Router: no API, no key. The wallet builds the transaction itself, so (unlike a third-party quote) the receiver,
  * token and amount are in calldata we wrote, and a wrong token or unsupported lane is refused by the Router on-chain.
  *
@@ -25,7 +25,18 @@ object CcipTestnet {
         BigInteger("13264668187771770619"), "0xbFA2ACd33ED6EEc0ed3Cc06bF1ac38d22b36B9e9"
     )
 
-    private val LANES = listOf(SEPOLIA, BNB_TESTNET)
+    // Router, selector and (Base) token match the values in Chainlink's CCIP directory; all addresses pass EIP-55.
+    // Whether a given pair of these networks has a lane is checked on chain (isChainSupported) before every quote.
+    val BASE_SEPOLIA = Lane(
+        Chain.BASE, 84_532L, "0xD3b06cEbF099CE7DA4AcCf578aaebFDBd6e88a93",
+        BigInteger("10344971235874465080"), "0x88A2d74F47a237a62e7A51cdDa67270CE381555e"
+    )
+    val ARBITRUM_SEPOLIA = Lane(
+        Chain.ARB, 421_614L, "0x2a9C5afB0d0e4BAb2BCdaE109EC4b0c4Be15a165",
+        BigInteger("3478487238524512106"), "0xA8C0c11bf64AF62CDCA6f93D3769B88BdD7cb93D"
+    )
+
+    private val LANES = listOf(SEPOLIA, BNB_TESTNET, BASE_SEPOLIA, ARBITRUM_SEPOLIA)
 
     const val BNM_SYMBOL = "CCIP-BnM"
     const val BNM_DECIMALS = 18
@@ -48,6 +59,7 @@ object CcipAbi {
     const val SELECTOR_GET_FEE = "20487ded"   // getFee(uint64,(bytes,bytes,(address,uint256)[],address,bytes))
     const val SELECTOR_CCIP_SEND = "96f4e9f9" // ccipSend(uint64,(bytes,bytes,(address,uint256)[],address,bytes))
     const val SELECTOR_DRIP = "67a5cd06"      // drip(address): the CCIP-BnM test-token faucet
+    const val SELECTOR_IS_CHAIN_SUPPORTED = "a48a9058" // isChainSupported(uint64): does this Router have a lane to that chain?
     const val EXTRA_ARGS_V2_TAG = "181dcf10"  // GenericExtraArgsV2: still accepted on CCIP 2.0 lanes (only gasLimit is honoured)
 
     private val ZERO_ADDRESS = "0x" + "0".repeat(40)
@@ -100,6 +112,11 @@ object CcipAbi {
 
     fun drip(to: String) = "0x" + SELECTOR_DRIP + addr(to)
 
+    fun isChainSupported(destSelector: BigInteger) = "0x" + SELECTOR_IS_CHAIN_SUPPORTED + word(destSelector)
+
+    /** True if an `isChainSupported` eth_call result is exactly the word 1. */
+    fun isTrue(returnData: String?): Boolean = returnData?.removePrefix("0x")?.let { it.length == 64 && it == "0".repeat(63) + "1" } ?: false
+
     /** The fee from a getFee eth_call result (exactly one 32-byte word), or null if malformed. */
     fun feeFromResult(returnData: String?): BigInteger? {
         val hex = returnData?.removePrefix("0x") ?: return null
@@ -113,10 +130,10 @@ object CcipGuard {
     /** Refuse a fee above this (0.05 of the native coin): a CCIP testnet fee is a small fraction of it. */
     val MAX_FEE_WEI: BigInteger = BigInteger("50000000000000000")
 
-    const val ONLY_BNM = "Only the CCIP-BnM test token can be bridged between Sepolia and BNB testnet. Use \"Get test CCIP-BnM\" on the home screen."
+    const val ONLY_BNM = "Only the CCIP-BnM test token can be bridged between the CCIP test networks. Use \"Get test CCIP-BnM\" on the home screen."
 
     fun validateRequest(origin: CcipTestnet.Lane?, dest: CcipTestnet.Lane?, token: String?, amount: BigInteger): String? {
-        if (origin == null || dest == null || origin.chain == dest.chain) return "CCIP connects Sepolia and BNB testnet only"
+        if (origin == null || dest == null || origin.chain == dest.chain) return "CCIP here connects only Sepolia, BNB, Base and Arbitrum testnets"
         if (token == null || !token.equals(origin.bnm, ignoreCase = true)) return ONLY_BNM
         if (amount.signum() <= 0) return "Invalid amount"
         return null

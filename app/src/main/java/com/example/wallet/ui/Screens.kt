@@ -615,9 +615,9 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
             if (vm.network == Network.TESTNET) {
                 "TESTNET ONLY. Two routes. (1) Test ETH between Sepolia and Base Sepolia through Relay: the wallet checks the deposit " +
                     "transaction, but Relay's server, not the transaction, decides where the funds go, so it is never offered with real " +
-                    "money; Relay limits test transfers to about $1. (2) The free CCIP-BnM test token between Sepolia and BNB testnet " +
+                    "money; Relay limits test transfers to about $1. (2) The free CCIP-BnM test token between Sepolia, BNB, Base and Arbitrum testnets " +
                     "through Chainlink CCIP: the wallet builds the transaction itself and your address is inside it. Get CCIP-BnM with " +
-                    "\"Get test CCIP-BnM\" on the home screen, and keep some ETH/BNB for the CCIP fee."
+                    "\"Get test CCIP-BnM\" on the home screen, and keep some ETH/BNB for the CCIP fee. Not every pair of networks has a CCIP lane: the wallet checks before quoting."
             } else if (provider.bridgeProviderNote != null) {
                 provider.bridgeProviderNote!!
             } else {

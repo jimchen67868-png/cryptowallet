@@ -80,9 +80,11 @@ class AppContainer(context: Context) {
             knownTokens = EthereumProvider.SEPOLIA_TOKENS +
                 com.example.wallet.data.TokenInfo(CcipTestnet.SEPOLIA.bnm, CcipTestnet.BNM_SYMBOL, CcipTestnet.BNM_DECIMALS)), BitcoinProvider(), BitcoinProvider.litecoin(testnet = true), SolanaProvider(), TronProvider(),
             evm(Chain.BASE, "https://base-sepolia-rpc.publicnode.com", 84532L, testnetTokens, true,
-                "Sepolia testnet", emptyList(), "https://base-sepolia.blockscout.com/api/v2", "https://sepolia.basescan.org/tx/", uniswap = UniswapDeployments.BASE_SEPOLIA, relayTestnet = true),
+                "Sepolia testnet", listOf(com.example.wallet.data.TokenInfo(CcipTestnet.BASE_SEPOLIA.bnm, CcipTestnet.BNM_SYMBOL, CcipTestnet.BNM_DECIMALS)),
+                "https://base-sepolia.blockscout.com/api/v2", "https://sepolia.basescan.org/tx/", uniswap = UniswapDeployments.BASE_SEPOLIA, relayTestnet = true, ccipTestnet = true),
             evm(Chain.ARB, "https://arbitrum-sepolia-rpc.publicnode.com", 421614L, testnetTokens, true,
-                "Sepolia testnet", emptyList(), "https://arbitrum-sepolia.blockscout.com/api/v2", "https://sepolia.arbiscan.io/tx/", uniswap = UniswapDeployments.ARBITRUM_SEPOLIA),
+                "Sepolia testnet", listOf(com.example.wallet.data.TokenInfo(CcipTestnet.ARBITRUM_SEPOLIA.bnm, CcipTestnet.BNM_SYMBOL, CcipTestnet.BNM_DECIMALS)),
+                "https://arbitrum-sepolia.blockscout.com/api/v2", "https://sepolia.arbiscan.io/tx/", uniswap = UniswapDeployments.ARBITRUM_SEPOLIA, ccipTestnet = true),
             evm(Chain.POL, "https://polygon-amoy-bor-rpc.publicnode.com", 80002L, testnetTokens, true,
                 "Amoy testnet", emptyList(), null, "https://amoy.polygonscan.com/tx/"),
             evm(Chain.BNB, "https://bsc-testnet-rpc.publicnode.com", 97L, testnetTokens, true,

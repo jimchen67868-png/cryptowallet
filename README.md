@@ -239,6 +239,16 @@ If there is none, the quote says "No usable SunSwap V2 pool found" and lists wha
 cross-chain ones above.
 Verified here: selectors (keccak) and calldata against an independent Python encoder. **Not run live.**
 
+### Testnet one-way transfers between EVM networks (CCIP-BnM)
+The free **CCIP-BnM** test token now moves one way (or back) between **Sepolia, BNB testnet, Base Sepolia and Arbitrum Sepolia** through
+Chainlink CCIP, called directly on each network's Router (calldata built in the wallet). Use "Get test CCIP-BnM" on the home screen, then
+**Move** it to another network. Before every quote the wallet asks the source Router `isChainSupported(destination)`, because not every
+pair of CCIP testnets has a lane; if there is none you get "CCIP has no lane from X to Y". Router, selectors and Base's token match Chainlink's
+directory (which shows addresses truncated; all four addresses here also pass their EIP-55 checksum). Arbitrum Sepolia's token address is
+from memory and not confirmed by the docs I could read, only by its checksum: a wrong one would show a zero/odd balance or be refused by the
+Router, never lose real money. Polygon Amoy is not added (addresses unverified). CCIP carries tokens, not native coins; there is no testnet
+service for Bitcoin, Litecoin, Solana or Tron cross-chain.
+
 ### Testnet cross-chain for Tron (research status)
 THORChain and the other bridges here have no Tron/Litecoin testnet. The one candidate found is **TRAIN Protocol** (atomic swaps locked by a
 secret, filled by market makers): its official deployment list has contracts on Tron **Nile** (`Train` TRooTQxWa3pgP6oA5QiyASxGKcRFRKY8k9)

@@ -55,7 +55,7 @@ class EthereumProvider(
     private val uniswapV2: UniswapV2Config? = null,
     /** Bridge TEST ETH to the other Relay testnet (Sepolia <-> Base Sepolia). Never set on mainnet. */
     private val relayTestnet: Boolean = false,
-    /** Bridge the CCIP-BnM test token between Sepolia and BNB testnet through Chainlink CCIP. Never set on mainnet. */
+    /** Bridge the CCIP-BnM test token between the CCIP test networks (Sepolia, BNB, Base, Arbitrum) through Chainlink CCIP. Never set on mainnet. */
     private val ccipTestnet: Boolean = false,
     /** THORChain swaps from the native coin to Bitcoin, Litecoin and Tron (mainnet only). */
     private val thor: ThorSwaps? = null
@@ -403,6 +403,13 @@ class EthereumProvider(
 
     /** The Router's fee for this exact transfer, in the native coin. A Router refuses an unsupported token or lane here. */
     private fun ccipFee(lane: CcipTestnet.Lane, dest: CcipTestnet.Lane, user: String, raw: BigInteger): BigInteger {
+        // Not every pair of CCIP testnets is connected: ask the source Router before asking for a fee.
+        val supported = web3.ethCall(
+            Transaction.createEthCallTransaction(user, lane.router, CcipAbi.isChainSupported(dest.selector)), DefaultBlockParameterName.LATEST
+        ).send()
+        if (supported.hasError() || !CcipAbi.isTrue(supported.value)) {
+            throw IllegalStateException("CCIP has no lane from ${chain.label} to ${dest.chain.label} on testnet. Try another destination.")
+        }
         val data = CcipAbi.getFee(dest.selector, user, lane.bnm, raw)
         val res = web3.ethCall(Transaction.createEthCallTransaction(user, lane.router, data), DefaultBlockParameterName.LATEST).send()
         if (res.hasError()) throw IllegalStateException("The CCIP router refused this transfer: ${res.error.message.orEmpty().take(160)}")

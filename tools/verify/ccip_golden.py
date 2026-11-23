@@ -33,12 +33,14 @@ GET_FEE = "getFee(uint64," + SIG + ")"; CCIP_SEND = "ccipSend(uint64," + SIG + "
 
 SEPOLIA = dict(router="0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59", selector=16015286601757825753, bnm="0xFd57b4ddBf88a4e07fF4e34C487b99af2Fe82a05")
 BNB = dict(router="0xE1053aE1857476f36A3C62580FF9b016E8EE8F6f", selector=13264668187771770619, bnm="0xbFA2ACd33ED6EEc0ed3Cc06bF1ac38d22b36B9e9")
+BASE = dict(router="0xD3b06cEbF099CE7DA4AcCf578aaebFDBd6e88a93", selector=10344971235874465080, bnm="0x88A2d74F47a237a62e7A51cdDa67270CE381555e")
+ARB = dict(router="0x2a9C5afB0d0e4BAb2BCdaE109EC4b0c4Be15a165", selector=3478487238524512106, bnm="0xA8C0c11bf64AF62CDCA6f93D3769B88BdD7cb93D")
 USER = "0xa3a0fccdf214159ce35d4a0066bb32fe10733d67"
 AMOUNT = 10**15
 
 if __name__ == "__main__":
     print("selectors:", {n: sel(s).hex() for n, s in [("getFee", GET_FEE), ("ccipSend", CCIP_SEND), ("drip", "drip(address)")]})
-    for name, d in [("SEPOLIA", SEPOLIA), ("BNB", BNB)]:
+    for name, d in [("SEPOLIA", SEPOLIA), ("BNB", BNB), ("BASE", BASE), ("ARB", ARB)]:
         for k in ("router", "bnm"):
             print(name, k, d[k], "EIP55_OK" if to_checksum(d[k]) == d[k] else "EIP55_MISMATCH -> " + to_checksum(d[k]))
     print("EXTRA_ARGS_V2 0x" + extra_args_v2(0, True).hex())
@@ -48,3 +50,11 @@ if __name__ == "__main__":
     print("DRIP 0x" + (sel("drip(address)") + w_addr(USER)).hex())
     m = message(USER, SEPOLIA["bnm"], AMOUNT)
     print("message words:", len(m) // 32, "| tuple head offsets:", [int.from_bytes(m[i*32:(i+1)*32], 'big') for i in (0, 1, 2, 4)])
+
+    # Base Sepolia and Arbitrum Sepolia lanes. Router/selector/BnM(Base) match the truncated values in Chainlink's CCIP directory;
+    # selectors are the full numbers shown there; every address passes its EIP-55 checksum.
+    print("IS_CHAIN_SUPPORTED_SELECTOR", sel("isChainSupported(uint64)").hex())
+    print("IS_CHAIN_SUPPORTED_BASE 0x" + (sel("isChainSupported(uint64)") + w_int(BASE["selector"])).hex())
+    print("GETFEE_SEPOLIA_TO_BASE 0x" + call(GET_FEE, BASE["selector"], USER, SEPOLIA["bnm"], AMOUNT).hex())
+    print("SEND_BASE_TO_ARB   0x" + call(CCIP_SEND, ARB["selector"], USER, BASE["bnm"], AMOUNT).hex())
+    print("SEND_ARB_TO_SEPOLIA 0x" + call(CCIP_SEND, SEPOLIA["selector"], USER, ARB["bnm"], 123456789012345678).hex())
