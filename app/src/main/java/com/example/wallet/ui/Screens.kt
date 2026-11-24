@@ -624,7 +624,7 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
                 "Your funds move between blockchains through LI.FI, routed over Across: both are third parties. It takes minutes and " +
                     "cannot be undone. The transaction comes from LI.FI, so the wallet decodes it and refuses to sign unless the " +
                     "receiver, token, amounts and fees match what you asked for. Fees include LI.FI's 0.25% service fee. " +
-                    "Start with a small amount. Tokens only for now (USDC, WETH...), not the native coin."
+                    "Start with a small amount. Supported: USDC/WETH-type tokens between Ethereum, Base, Arbitrum, Polygon and BNB Chain, and native ETH between Ethereum, Base and Arbitrum."
             },
             style = MaterialTheme.typography.bodySmall
         )

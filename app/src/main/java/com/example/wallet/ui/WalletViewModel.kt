@@ -461,7 +461,8 @@ class WalletViewModel(
     fun swapTargetsAfterBridge(chain: Chain, from: TokenBalance?, dest: Chain): List<SwapAsset> = try {
         val fromAsset = SwapAsset(from?.id, from?.symbol ?: chain.symbol, from?.decimals ?: 18)
         // THORChain routes (Litecoin, Tron) deliver the native coin straight to your address: no swap-on-arrival step.
-        val cands = if (netProvider(chain).bridgeProviderNote != null || !dest.isEvm) emptyList() else bridgeCandidates(fromAsset, chain, dest)
+        val cands = if (netProvider(chain).bridgeProviderNote != null || !dest.isEvm || from == null || chain == Chain.BNB || dest == Chain.BNB) emptyList()
+        else bridgeCandidates(fromAsset, chain, dest)
         if (cands.isEmpty()) emptyList()
         else {
             val keys = cands.map { SwapGuard.tokenKey(it) }.toSet()

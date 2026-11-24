@@ -81,6 +81,15 @@ Mainnet EVM lists now include DAI, WBTC, UNI, AAVE, BTCB, WBNB, LINK where each 
 BONK, WIF, mSOL and JitoSOL; because a mistyped base58 mint still looks valid, every Solana mint is verified on-chain (exists, is a mint,
 expected decimals) before a quote is requested. Tokens you add yourself can be swap targets but carry a warning.
 
+### Update 2026-11-23: more origins, native ETH and BNB Chain
+Quotes captured with `tools/capture_lifi_all.sh` showed the same LI.FI Diamond, fee contract and fee recipient on Ethereum, Base, Polygon, Arbitrum and
+BNB Chain, so all five are now pinned as origins. **Native ETH** can be bridged between Ethereum, Base and Arbitrum (the guard checks the
+transaction value equals the amount, the native fee step `0x0e8ae67f`, and that the Across deposit uses each network's WETH). **BNB Chain**
+USDC/USDT (18 decimals there, 6 elsewhere) are bridged with explicit decimal conversion in the guard and the quote. Not enabled: Polygon's native
+coin (no quote available), BNB's native coin (LI.FI routes it over a different bridge, Relay, which the guard does not accept), and swap-on-arrival
+for native or BNB routes. Real captured quotes are test fixtures (`app/src/test/resources/lifi/`); `tools/verify/lifi_guard_check.py` is an independent
+port of the rules and passes on the same files. The transactions themselves have never been broadcast by this wallet: first use a few dollars.
+
 ## Moving funds to another network (LI.FI, routed over Across; EVM mainnets)
 **Swap screen -> "Move X to another network..."** bridges a token between Ethereum, Base, Arbitrum and Polygon (USDC, USDT, DAI, WBTC,
 WETH, LINK where both chains list it). To change asset as well, use **Bridge, then swap on arrival** below, or bridge first and swap after.

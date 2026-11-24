@@ -121,28 +121,29 @@ class AcrossTest {
 
     // ---- routes ----
     @Test fun routes_spokePoolsAreChecksummedAndDistinct() {
-        val pools = AcrossRoutes.MAINNET.map { it.spokePool }
+        val pools = AcrossRoutes.MAINNET.map { it.spokePool }.filter { it.isNotEmpty() } // BNB Chain: LI.FI only, no direct deposit
         for (p in pools) assertEquals(p, Keys.toChecksumAddress(p))
         assertEquals(pools.size, pools.map { it.lowercase() }.toSet().size)
     }
 
     @Test fun routes_chainsAndNativeCoins() {
         val byChain = AcrossRoutes.MAINNET.associateBy { it.chain }
-        assertEquals(setOf(Chain.ETH, Chain.BASE, Chain.ARB, Chain.POL), byChain.keys)
-        assertEquals(listOf(1L, 8453L, 42161L, 137L), listOf(Chain.ETH, Chain.BASE, Chain.ARB, Chain.POL).map { byChain.getValue(it).chainId })
+        assertEquals(setOf(Chain.ETH, Chain.BASE, Chain.ARB, Chain.POL, Chain.BNB), byChain.keys)
+        assertEquals(listOf(1L, 8453L, 42161L, 137L, 56L), listOf(Chain.ETH, Chain.BASE, Chain.ARB, Chain.POL, Chain.BNB).map { byChain.getValue(it).chainId })
         assertTrue(byChain.getValue(Chain.ETH).nativeIsEth && byChain.getValue(Chain.BASE).nativeIsEth && byChain.getValue(Chain.ARB).nativeIsEth)
         assertFalse(byChain.getValue(Chain.POL).nativeIsEth) // POL is not ETH: native bridging is refused there
     }
 
     @Test fun routes_everyChainHasWethAndUsdc() {
         for (r in AcrossRoutes.MAINNET) {
-            assertNotNull("${r.chain} WETH", r.tokens.firstOrNull { it.symbol == "WETH" })
+            if (r.chain != Chain.BNB) assertNotNull("${r.chain} WETH", r.tokens.firstOrNull { it.symbol == "WETH" })
             assertNotNull("${r.chain} USDC", r.tokens.firstOrNull { it.symbol == "USDC" })
         }
     }
 
     @Test fun routes_sameSymbolHasSameDecimalsOnEveryChain() {
-        val bySymbol = AcrossRoutes.MAINNET.flatMap { r -> r.tokens.map { it.symbol to it.decimals } }.groupBy({ it.first }, { it.second })
+        // BNB Chain's USDC/USDT are 18 decimals (documented in EvmTokens): that route converts amounts explicitly.
+        val bySymbol = AcrossRoutes.MAINNET.filter { it.chain != Chain.BNB }.flatMap { r -> r.tokens.map { it.symbol to it.decimals } }.groupBy({ it.first }, { it.second })
         for ((symbol, decimals) in bySymbol) assertEquals("$symbol decimals differ between chains", 1, decimals.toSet().size)
     }
 

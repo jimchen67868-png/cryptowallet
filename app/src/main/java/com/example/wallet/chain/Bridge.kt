@@ -20,14 +20,19 @@ class BridgeRoute(
     val weth: String get() = tokens.first { it.symbol == "WETH" }.address
 }
 
-/** Across V3 SpokePool deployments (EIP-55 checked in the tests). BNB Chain is not offered. */
+/**
+ * Across V3 SpokePool deployments (EIP-55 checked in the tests). BNB Chain is a LI.FI-only route: its [BridgeRoute.spokePool] is
+ * empty because the wallet never calls a SpokePool directly (LI.FI's Diamond does, and the guard pins that), and its USDC/USDT
+ * have 18 decimals instead of 6.
+ */
 object AcrossRoutes {
     val MAINNET: List<BridgeRoute> by lazy {
         listOf(
             BridgeRoute(Chain.ETH, 1L, "0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5", true, EthereumProvider.MAINNET_TOKENS),
             BridgeRoute(Chain.BASE, 8453L, "0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64", true, EvmTokens.BASE),
             BridgeRoute(Chain.ARB, 42161L, "0xe35e9842fceaCA96570B734083f4a58e8F7C5f2A", true, EvmTokens.ARBITRUM),
-            BridgeRoute(Chain.POL, 137L, "0x9295ee1d8C5b022Be115A2AD3c30C72E34e7F096", false, EvmTokens.POLYGON)
+            BridgeRoute(Chain.POL, 137L, "0x9295ee1d8C5b022Be115A2AD3c30C72E34e7F096", false, EvmTokens.POLYGON),
+            BridgeRoute(Chain.BNB, 56L, "", false, EvmTokens.BNB)
         )
     }
 }
@@ -53,10 +58,12 @@ class BridgeQuote(
     /** The user's own address on [destChain] when the provider needs one (THORChain), shown before confirming. */
     val destAddress: String? = null,
     /** Provider-specific explanation shown in the confirmation instead of the Across refund text. */
-    val note: String? = null
+    val note: String? = null,
+    /** Decimals of [amountOutRaw] when they differ from [decimals] (BNB Chain USDC is 18, Arbitrum USDC is 6). */
+    val outDecimals: Int? = null
 ) {
     val amountIn: BigDecimal get() = BigDecimal(amountInRaw).movePointLeft(decimals)
-    val amountOut: BigDecimal get() = BigDecimal(amountOutRaw).movePointLeft(decimals)
+    val amountOut: BigDecimal get() = BigDecimal(amountOutRaw).movePointLeft(outDecimals ?: decimals)
     val fee: BigDecimal get() = BigDecimal(feeRaw).movePointLeft(decimals)
     /** The separate native-coin fee, or zero. */
     val networkFee: BigDecimal get() = BigDecimal(networkFeeRaw).movePointLeft(networkFeeDecimals)

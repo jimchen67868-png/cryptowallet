@@ -431,6 +431,155 @@ class EthereumProvider(
             "- the router has contract code on ${chain.label}\n" + sim
     }
 
+    // ---- Chainlink CCIP (testnet): CCIP-BnM between Sepolia and BNB testnet, called on the Router directly ----
+
+    /** The Router's fee for this exact transfer, in the native coin. A Router refuses an unsupported token or lane here. */
+    private fun ccipFee(lane: CcipTestnet.Lane, dest: CcipTestnet.Lane, user: String, raw: BigInteger): BigInteger {
+        // Not every pair of CCIP testnets is connected: ask the source Router before asking for a fee.
+        val supported = web3.ethCall(
+            Transaction.createEthCallTransaction(user, lane.router, CcipAbi.isChainSupported(dest.selector)), DefaultBlockParameterName.LATEST
+        ).send()
+        if (supported.hasError() || !CcipAbi.isTrue(supported.value)) {
+            throw IllegalStateException("CCIP has no lane from ${chain.label} to ${dest.chain.label} on testnet. Try another destination.")
+        }
+        val data = CcipAbi.getFee(dest.selector, user, lane.bnm, raw)
+        val res = web3.ethCall(Transaction.createEthCallTransaction(user, lane.router, data), DefaultBlockParameterName.LATEST).send()
+        if (res.hasError()) throw IllegalStateException("The CCIP router refused this transfer: ${res.error.message.orEmpty().take(160)}")
+        val fee = CcipAbi.feeFromResult(res.value)
+        CcipGuard.validateFee(fee)?.let { throw IllegalStateException(it) }
+        return fee!!
+    }
+
+    private fun quoteCcip(user: String, from: SwapAsset, dest: Chain, raw: BigInteger): BridgeQuote {
+        val lane = ccipLane
+        val destLane = CcipTestnet.laneOf(dest)
+        CcipGuard.validateRequest(lane, destLane, from.id, raw)?.let { throw IllegalStateException(it) }
+        lane!!; destLane!!
+        val fee = ccipFee(lane, destLane, user, raw)
+        val needsApproval = allowance(lane.bnm, user, lane.router) < raw
+        // CCIP-BnM is burned here and minted there one for one; the fee is paid separately in the native coin.
+        return BridgeQuote(
+            chain, dest, from, raw, raw, BigInteger.ZERO, CcipTestnet.BNM_DECIMALS, CcipTestnet.BNM_SYMBOL, 0L, needsApproval,
+            networkFeeRaw = fee, networkFeeSymbol = chain.symbol
+        )
+    }
+
+    private fun executeCcip(seed: ByteArray, quote: BridgeQuote): SwapResult {
+        val lane = ccipLane
+        val destLane = CcipTestnet.laneOf(quote.destChain)
+        val raw = quote.amountInRaw
+        CcipGuard.validateRequest(lane, destLane, quote.from.id, raw)?.let { throw IllegalStateException(it) }
+        lane!!; destLane!!
+        val creds = credentials(seed)
+        val user = creds.address
+        val txManager = RawTransactionManager(web3, creds, chainId)
+
+        // Exact-amount approval to the Router (never unlimited).
+        val approvals = ArrayList<String>()
+        val current = allowance(lane.bnm, user, lane.router)
+        if (current < raw) {
+            if (current.signum() > 0) approvals.add(sendApproval(txManager, user, lane.bnm, lane.router, BigInteger.ZERO))
+            approvals.add(sendApproval(txManager, user, lane.bnm, lane.router, raw))
+        }
+
+        // Read the fee after the approval confirmed, so it is current; refuse if it moved a lot since the user saw it.
+        val fee = ccipFee(lane, destLane, user, raw)
+        check(CcipGuard.freshFeeAcceptable(quote.networkFeeRaw, fee)) { "The CCIP fee changed. Please request a new quote." }
+
+        // eth_estimateGas inside sendCall fails closed if the Router would reject this call.
+        val hash = sendCall(txManager, user, lane.router, fee, CcipAbi.ccipSend(destLane.selector, user, lane.bnm, raw))
+        return SwapResult(approvals, hash, "ccip:$hash")
+    }
+
+    override val faucetTokenSymbol: String? get() = ccipLane?.let { CcipTestnet.BNM_SYMBOL }
+
+    /** CCIP-BnM's public faucet: drip(address) mints a small amount to the caller. */
+    override suspend fun requestFaucetToken(seed: ByteArray): String = withContext(Dispatchers.IO) {
+        val lane = ccipLane ?: throw UnsupportedOperationException("No test-token faucet on this network")
+        val creds = credentials(seed)
+        val txManager = RawTransactionManager(web3, creds, chainId)
+        sendCall(txManager, creds.address, lane.bnm, BigInteger.ZERO, CcipAbi.drip(creds.address))
+    }
+
+    private val relay: RelayApi by lazy { RelayApi() }
+
+    /** A fresh Relay testnet quote for exactly what the user asked for, checked by [RelayGuard]. */
+    private fun freshRelayQuote(user: String, dest: Chain, raw: BigInteger): RelayQuote {
+        val destId = RelayTestnet.chainIdOf(dest) ?: throw IllegalArgumentException("${dest.label} is not a supported destination")
+        val req = RelayRequest(user, chainId, destId, raw)
+        val quote = relay.quote(req)
+        RelayGuard.validate(quote, req)?.let { throw IllegalStateException(it) }
+        return quote
+    }
+
+    private class BridgePlan(
+        val route: BridgeRoute, val dest: BridgeRoute,
+        val inputToken: String, val outputToken: String, val decimals: Int, val outSymbol: String,
+        /** Decimals of the output token (differs from [decimals] between BNB Chain and the other networks). */
+        val outDecimals: Int = decimals
+    )
+
+    private fun bridgePlan(from: SwapAsset, destChain: Chain): BridgePlan {
+        val origin = originRoute ?: throw UnsupportedOperationException("Bridging is not available on ${chain.label}")
+        val dest = bridgeRoutes.firstOrNull { it.chain == destChain && it.chain != chain }
+            ?: throw IllegalArgumentException("${destChain.label} is not a supported destination")
+        if (from.id == null) {
+            // Native ETH only between networks whose native coin is ETH and for which a real native quote was captured and pinned.
+            check(LiFiPins.WRAPPED_NATIVE.containsKey(origin.chainId) && LiFiPins.WRAPPED_NATIVE.containsKey(dest.chainId)) {
+                "${chain.symbol} can't be bridged to ${dest.chain.label} here. Bridge a token such as USDC instead."
+            }
+            // The deposit travels as WETH inside Across; the receiver gets ETH. Both ends are asked for the native coin.
+            return BridgePlan(origin, dest, LiFiPins.ZERO, LiFiPins.ZERO, 18, "ETH")
+        }
+        val src = origin.tokens.firstOrNull { it.address.equals(from.id, ignoreCase = true) }
+            ?: throw IllegalArgumentException("${from.symbol} can't be bridged from ${chain.label}")
+        val dst = dest.tokens.firstOrNull { it.symbol == src.symbol }
+            ?: throw IllegalArgumentException("${src.symbol} isn't available on ${dest.chain.label}")
+        return BridgePlan(origin, dest, src.address, dst.address, src.decimals, dst.symbol, dst.decimals)
+    }
+
+    private fun nowSeconds() = System.currentTimeMillis() / 1000
+
+    /** A fresh LI.FI quote for exactly what the user asked for, checked by [LiFiGuard]. Throws with a user-facing reason. */
+    private fun freshQuote(plan: BridgePlan, from: SwapAsset, raw: BigInteger, user: String): LiFiQuote {
+        val req = LiFiRequest(user, plan.route.chainId, plan.dest.chainId, from.id, plan.outputToken, raw, plan.decimals, plan.outDecimals)
+        val quote = lifi.quote(req)
+        LiFiGuard.validate(quote, req, nowSeconds())?.let { throw IllegalStateException(it) }
+        return quote
+    }
+
+    override suspend fun quoteBridge(
+        userAddress: String, from: SwapAsset, dest: Chain, amount: BigDecimal
+    ): BridgeQuote = withContext(Dispatchers.IO) {
+        if (relayTestnet || ccipTestnet) {
+            if (ccipLane != null && from.id != null && CcipTestnet.laneOf(dest) != null) {
+                return@withContext quoteCcip(userAddress, from, dest, rawAmount(amount, from.decimals))
+            }
+            if (!relayTestnet || from.id != null || RelayTestnet.chainIdOf(dest) == null) throw IllegalStateException(TestnetRoutes.UNSUPPORTED)
+            val rawEth = rawAmount(amount, from.decimals)
+            val rq = freshRelayQuote(userAddress, dest, rawEth)
+            return@withContext BridgeQuote(
+                chain, dest, from, rawEth, rq.amountOut, rawEth.subtract(rq.amountOut),
+                18, dest.symbol, rq.etaSeconds, false
+            )
+        }
+        val plan = bridgePlan(from, dest)
+        val raw = rawAmount(amount, from.decimals)
+        val q = freshQuote(plan, from, raw, userAddress)
+        val needsApproval = from.id != null && allowance(from.id, userAddress, q.approvalAddress) < raw
+        // Total cost = LI.FI's 0.25% service fee plus the Across fee, in the input token's units.
+        val outInInputUnits = when {
+            plan.outDecimals == plan.decimals -> q.toAmount
+            plan.outDecimals > plan.decimals -> q.toAmount.divide(BigInteger.TEN.pow(plan.outDecimals - plan.decimals))
+            else -> q.toAmount.multiply(BigInteger.TEN.pow(plan.decimals - plan.outDecimals))
+        }
+        BridgeQuote(
+            chain, dest, from, raw, q.toAmount, raw.subtract(outInInputUnits).max(BigInteger.ZERO),
+            plan.decimals, plan.outSymbol, q.executionSeconds, needsApproval,
+            outDecimals = plan.outDecimals
+        )
+    }
+
     override suspend fun executeBridge(seed: ByteArray, quote: BridgeQuote): SwapResult = withContext(Dispatchers.IO) {
         (quote.payload as? ThorPlan)?.let { return@withContext executeThor(seed, quote, it) }
         if (relayTestnet || ccipTestnet) {
@@ -453,7 +602,7 @@ class EthereumProvider(
         val user = creds.address
         val txManager = RawTransactionManager(web3, creds, chainId)
         val raw = quote.amountInRaw
-        val srcToken = quote.from.id ?: throw IllegalStateException(LiFiGuard.NATIVE_UNSUPPORTED)
+        val srcToken = quote.from.id // null = the native coin: no approval, the amount travels as the transaction value
         val floor = quote.amountOutRaw.multiply(BigInteger.valueOf(98)).divide(BigInteger.valueOf(100))
 
         var q = freshQuote(plan, quote.from, raw, user)
@@ -461,8 +610,8 @@ class EthereumProvider(
 
         // Approve exactly this amount to LI.FI's (pinned) Diamond, never unlimited.
         val approvals = ArrayList<String>()
-        val current = allowance(srcToken, user, q.approvalAddress)
-        if (current < raw) {
+        val current = if (srcToken == null) raw else allowance(srcToken, user, q.approvalAddress)
+        if (srcToken != null && current < raw) {
             if (current.signum() > 0) approvals.add(sendApproval(txManager, user, srcToken, q.approvalAddress, BigInteger.ZERO))
             approvals.add(sendApproval(txManager, user, srcToken, q.approvalAddress, raw))
             // LI.FI says to re-fetch after an approval: quote timestamps and gas estimates go stale while it confirms.
@@ -471,7 +620,8 @@ class EthereumProvider(
         }
 
         // eth_estimateGas inside sendCall fails closed if the Diamond would reject this call.
-        SwapResult(approvals, sendCall(txManager, user, q.txTo, BigInteger.ZERO, q.txData))
+        // The guard guarantees q.txValue is 0 for a token and exactly the amount for the native coin.
+        SwapResult(approvals, sendCall(txManager, user, q.txTo, q.txValue, q.txData))
     }
 
     override suspend fun bridgeFillStatus(depositTxId: String): FillStatus = withContext(Dispatchers.IO) {

@@ -35,10 +35,13 @@ class LiFiRequest(
     val user: String,
     val fromChainId: Long,
     val toChainId: Long,
-    /** Source token address, or null for the native coin (not supported yet). */
+    /** Source token address, or null for the native coin (then [toToken] must be the zero address too). */
     val fromToken: String?,
     val toToken: String,
-    val amount: BigInteger
+    val amount: BigInteger,
+    /** Decimals of the source and destination token (they differ for USDC/USDT on BNB Chain: 18, versus 6 elsewhere). */
+    val fromDecimals: Int = 18,
+    val toDecimals: Int = 18
 )
 
 object LiFiQuoteParser {
@@ -98,9 +101,29 @@ object LiFiPins {
 
     const val DIAMOND = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"
 
+    private const val FEE_CONTRACT = "0xDe2b920506EE931a6A2ABDF566526220214FBbAE"
+    private const val FEE_RECIPIENT = "0xC06ebbefD94032B85424D51906e2A335EFAe264B"
+    const val ZERO = "0x0000000000000000000000000000000000000000"
+
     val PINNED: Map<Long, Pin> = mapOf(
         // Arbitrum: both fee addresses observed in a real quote (USDC, Arbitrum -> Base, 2026-11-18).
-        42161L to Pin(42161L, DIAMOND, "0xDe2b920506EE931a6A2ABDF566526220214FBbAE", "0xC06ebbefD94032B85424D51906e2A335EFAe264B")
+        42161L to Pin(42161L, DIAMOND, FEE_CONTRACT, FEE_RECIPIENT),
+        // Observed in real quotes on 2026-11-23 (tools/capture_lifi_all.sh): the same Diamond, fee contract and fee recipient
+        // appear on every one of these networks (USDC -> Arbitrum from each; BNB Chain also USDC <- Arbitrum).
+        1L to Pin(1L, DIAMOND, FEE_CONTRACT, FEE_RECIPIENT),
+        8453L to Pin(8453L, DIAMOND, FEE_CONTRACT, FEE_RECIPIENT),
+        137L to Pin(137L, DIAMOND, FEE_CONTRACT, FEE_RECIPIENT),
+        56L to Pin(56L, DIAMOND, FEE_CONTRACT, FEE_RECIPIENT)
+    )
+
+    /**
+     * Native ETH is bridged as WETH inside the Across deposit. Only networks whose native coin is ETH and for which a real
+     * native quote was captured: Ethereum, Base, Arbitrum. (Polygon native gets no quote; BNB native is routed over another bridge.)
+     */
+    val WRAPPED_NATIVE: Map<Long, String> = mapOf(
+        1L to "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+        8453L to "0x4200000000000000000000000000000000000006",
+        42161L to "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
     )
 
     fun forChain(chainId: Long): Pin? = PINNED[chainId]
@@ -210,7 +233,18 @@ internal object LiFiCalldata {
         null
     }
 
+    /** The native-coin fee step: 0x0e8ae67f((address recipient, uint256 amount)[]) with exactly one recipient. */
+    fun decodeNativeFeeCall(callData: String): FeeCall? = try {
+        require(callData.length == 8 + 4 * 64 && callData.startsWith(NATIVE_FEE_SELECTOR))
+        val ww = (0 until 4).map { BigInteger(callData.substring(8 + it * 64, 8 + (it + 1) * 64), 16) }
+        require(ww[0] == BigInteger.valueOf(0x20) && ww[1] == BigInteger.ONE && ww[2].bitLength() <= 160)
+        FeeCall(LiFiPins.ZERO, listOf("0x" + ww[2].toString(16).padStart(40, '0') to ww[3]))
+    } catch (e: Exception) {
+        null
+    }
+
     const val FEE_SELECTOR = "332d746b"
+    const val NATIVE_FEE_SELECTOR = "0e8ae67f"
 }
 
 /** Fails closed: returns a user-facing reason to refuse, or null if the quote is exactly what the user asked for. */
@@ -232,7 +266,12 @@ object LiFiGuard {
     private fun addrOf(v: BigInteger) = "0x" + v.toString(16).padStart(40, '0')
 
     fun validate(q: LiFiQuote, r: LiFiRequest, nowSec: Long): String? {
-        val fromToken = r.fromToken ?: return NATIVE_UNSUPPORTED
+        val native = r.fromToken == null
+        val fromToken = r.fromToken ?: LiFiPins.ZERO
+        val wrappedIn = if (native) LiFiPins.WRAPPED_NATIVE[r.fromChainId] else null
+        val wrappedOut = if (native) LiFiPins.WRAPPED_NATIVE[r.toChainId] else null
+        if (native && (wrappedIn == null || wrappedOut == null)) return NATIVE_UNSUPPORTED
+        if (native && !same(r.toToken, LiFiPins.ZERO)) return "A native-coin bridge must ask for the native coin on the destination too"
         val pin = LiFiPins.forChain(r.fromChainId) ?: return "Bridging from this network through LI.FI isn't enabled in this build yet."
 
         // What was asked for.
@@ -246,7 +285,11 @@ object LiFiGuard {
         if (!same(q.approvalAddress, pin.diamond)) return "Unexpected approval address in the quote"
         if (q.txChainId != r.fromChainId) return "The quote's transaction is for a different network"
         if (!same(q.txFrom, r.user)) return "The quote's transaction is for a different sender"
-        if (q.txValue.signum() != 0) return "The quote asks to send native coin with a token transfer"
+        if (native) {
+            if (q.txValue != r.amount) return "The quote's transaction value doesn't match the amount"
+        } else if (q.txValue.signum() != 0) {
+            return "The quote asks to send native coin with a token transfer"
+        }
 
         // The calldata itself.
         val d = LiFiCalldata.decode(q.txData) ?: return "The bridge transaction has an unrecognised format"
@@ -266,7 +309,8 @@ object LiFiGuard {
             if (!same(s.callTo, pin.feeContract) || !same(s.approveTo, pin.feeContract)) return "The bridge transaction calls an unknown fee contract"
             if (!same(s.sendingAssetId, fromToken) || !same(s.receivingAssetId, fromToken)) return "The fee step changes the token"
             if (s.fromAmount != r.amount) return "The fee step uses a different amount"
-            val call = LiFiCalldata.decodeFeeCall(s.callData) ?: return "The fee step has an unrecognised format"
+            val call = (if (native) LiFiCalldata.decodeNativeFeeCall(s.callData) else LiFiCalldata.decodeFeeCall(s.callData))
+                ?: return "The fee step has an unrecognised format"
             if (!same(call.token, fromToken)) return "The fee step uses a different token"
             val (recipient, amount) = call.recipients.single()
             if (!same(recipient, pin.feeRecipient)) return "The fee would go to an unknown address"
@@ -283,8 +327,9 @@ object LiFiGuard {
         // The Across deposit parameters (11 head words of AcrossV4Data).
         val a = d.across
         if (!same(addrOf(a[0]), r.user) || !same(addrOf(a[1]), r.user)) return "The deposit would use a different recipient or refund address"
-        if (!same(addrOf(a[2]), fromToken)) return "The deposit uses a different input token"
-        if (!same(addrOf(a[3]), r.toToken)) return "The deposit pays out a different token"
+        // A native-coin trip is deposited as WETH on the origin and paid out as WETH on the destination (the receiver gets ETH).
+        if (!same(addrOf(a[2]), wrappedIn ?: fromToken)) return "The deposit uses a different input token"
+        if (!same(addrOf(a[3]), wrappedOut ?: r.toToken)) return "The deposit pays out a different token"
         if (a[4] != q.toAmount) return "The deposit output doesn't match the quote"
         if (a[5].signum() <= 0 || a[5] > ONE_E18 || a[5] < MIN_OUTPUT_PERCENT) return "The deposit output percentage is out of range"
         if (a[6].bitLength() > 160) return "Invalid relayer address in the deposit"
@@ -297,10 +342,14 @@ object LiFiGuard {
         if (exclusivity.toLong() > nowSec + MAX_DEADLINE_SECONDS) return "Invalid exclusivity window in the deposit"
 
         // Money: the user must get at least 95% of what they put in, and never more than they put in.
-        if (q.toAmount.signum() <= 0 || q.toAmount > b.minAmount) return "The quoted output is inconsistent"
+        // Amounts are compared in a common scale because the two tokens can have different decimals (BNB Chain USDC: 18, others: 6).
+        val sIn = BigInteger.TEN.pow(r.fromDecimals)
+        val sOut = BigInteger.TEN.pow(r.toDecimals)
+        if (q.toAmount.signum() <= 0 || q.toAmount.multiply(sIn) > b.minAmount.multiply(sOut)) return "The quoted output is inconsistent"
         if (q.toAmountMin.signum() <= 0 || q.toAmountMin > q.toAmount) return "The quoted minimum output is inconsistent"
-        val floor = r.amount.multiply(BigInteger.valueOf(100 - MAX_TOTAL_FEE_PERCENT)).divide(BigInteger.valueOf(100))
-        if (q.toAmountMin < floor) return "The fees are over $MAX_TOTAL_FEE_PERCENT% of the amount. Try a larger amount."
+        if (q.toAmountMin.multiply(sIn).multiply(BigInteger.valueOf(100)) <
+            r.amount.multiply(BigInteger.valueOf(100 - MAX_TOTAL_FEE_PERCENT)).multiply(sOut)
+        ) return "The fees are over $MAX_TOTAL_FEE_PERCENT% of the amount. Try a larger amount."
         return null
     }
 }
@@ -333,7 +382,7 @@ internal class LiFiApi(
     private val address = Regex("0x[0-9a-fA-F]{40}")
 
     fun quote(r: LiFiRequest): LiFiQuote {
-        val fromToken = r.fromToken ?: throw IllegalStateException(LiFiGuard.NATIVE_UNSUPPORTED)
+        val fromToken = r.fromToken ?: LiFiPins.ZERO
         require(address.matches(r.user) && address.matches(fromToken) && address.matches(r.toToken)) { "Invalid address in the bridge request" }
         require(r.amount.signum() > 0) { "Invalid amount" }
         // allowBridges asks LI.FI for Across routes only: the guard accepts nothing else.

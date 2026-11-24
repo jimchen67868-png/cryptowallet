@@ -130,7 +130,7 @@ class AppContainer(context: Context) {
             evm(Chain.POL, "https://polygon-bor-rpc.publicnode.com", 137L, mainnetTokens, false,
                 "Mainnet", EvmTokens.POLYGON, "https://polygon.blockscout.com/api/v2", "https://polygonscan.com/tx/", 137, bridgeRoutes = AcrossRoutes.MAINNET),
             evm(Chain.BNB, "https://bsc-rpc.publicnode.com", 56L, mainnetTokens, false,
-                "Mainnet", EvmTokens.BNB, null, "https://bscscan.com/tx/", 56, thor = com.example.wallet.chain.ThorSwaps())
+                "Mainnet", EvmTokens.BNB, null, "https://bscscan.com/tx/", 56, bridgeRoutes = AcrossRoutes.MAINNET, thor = com.example.wallet.chain.ThorSwaps())
         )
     }
 

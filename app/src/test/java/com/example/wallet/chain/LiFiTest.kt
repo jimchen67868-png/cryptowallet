@@ -139,12 +139,14 @@ class LiFiTest {
 
     // ---- guard: the request ----
 
-    @Test fun guard_nativeCoinIsNotSupportedYet() =
-        assertEquals(LiFiGuard.NATIVE_UNSUPPORTED, LiFiGuard.validate(parse(), LiFiRequest(user, 42161L, 8453L, null, usdcBase, BigInteger.valueOf(2_000_000)), now))
+    @Test fun guard_nativeCoinOnlyWhereItsWrappedFormIsPinned() {
+        // Polygon's native coin is POL, not ETH: refused. (Real native quotes are tested in LiFiCaptureTest.)
+        assertEquals(LiFiGuard.NATIVE_UNSUPPORTED, LiFiGuard.validate(parse(), LiFiRequest(user, 137L, 8453L, null, LiFiPins.ZERO, BigInteger.valueOf(2_000_000)), now))
+    }
 
     @Test fun guard_unverifiedOriginChainsAreRefused() {
-        assertRefused("isn't enabled in this build", parse(), LiFiRequest(user, 1L, 8453L, usdcArb, usdcBase, BigInteger.valueOf(2_000_000)))
-        assertRefused("isn't enabled in this build", parse(), LiFiRequest(user, 137L, 8453L, usdcArb, usdcBase, BigInteger.valueOf(2_000_000)))
+        assertRefused("isn't enabled in this build", parse(), LiFiRequest(user, 10L, 8453L, usdcArb, usdcBase, BigInteger.valueOf(2_000_000)))
+        assertRefused("isn't enabled in this build", parse(), LiFiRequest(user, 43114L, 8453L, usdcArb, usdcBase, BigInteger.valueOf(2_000_000)))
     }
 
     @Test fun guard_wrongBridgeToolOrRoute() {
@@ -306,8 +308,6 @@ class LiFiTest {
             LiFiRequest(user, 42161L, 8453L, "$usdcArb&evil=1", usdcBase, BigInteger.ONE),
             LiFiRequest(user, 42161L, 8453L, usdcArb, usdcBase, BigInteger.ZERO)
         )) { try { LiFiApi("https://li.quest/v1", net.transport).quote(bad); fail() } catch (e: IllegalArgumentException) { /* expected */ } }
-        try { LiFiApi("https://li.quest/v1", net.transport).quote(LiFiRequest(user, 42161L, 8453L, null, usdcBase, BigInteger.ONE)); fail() }
-        catch (e: IllegalStateException) { assertEquals(LiFiGuard.NATIVE_UNSUPPORTED, e.message) }
         assertTrue("nothing was sent for bad input", net.urls.isEmpty())
     }
 
