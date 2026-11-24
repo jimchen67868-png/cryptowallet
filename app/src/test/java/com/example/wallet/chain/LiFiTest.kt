@@ -261,8 +261,9 @@ class LiFiTest {
     @Test fun pins_areChecksummedAndOnlyVerifiedChainsAreListed() {
         val pin = LiFiPins.forChain(42161L)!!
         for (a in listOf(pin.diamond, pin.feeContract, pin.feeRecipient, LiFiPins.DIAMOND)) assertEquals(Keys.toChecksumAddress(a), a)
-        assertEquals(setOf(42161L), LiFiPins.PINNED.keys)
-        assertNull(LiFiPins.forChain(1L)); assertNull(LiFiPins.forChain(8453L)); assertNull(LiFiPins.forChain(137L))
+        // Arbitrum from a quote on 2026-11-18; Ethereum, Base, Polygon and BNB Chain from the captures of 2026-11-23 (LiFiCaptureTest).
+        assertEquals(setOf(42161L, 1L, 8453L, 137L, 56L), LiFiPins.PINNED.keys)
+        assertNull(LiFiPins.forChain(10L)); assertNull(LiFiPins.forChain(43114L))
     }
 
     // ---- status ----

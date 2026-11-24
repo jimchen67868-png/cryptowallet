@@ -7,7 +7,7 @@ import lifi_decode as d
 DIAMOND = "0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae"
 FEE_CONTRACT = "0xde2b920506ee931a6a2abdf566526220214fbbae"
 FEE_RECIPIENT = "0xc06ebbefd94032b85424d51906e2a335efae264b"
-PINNED = {1, 8453, 137, 42161}
+PINNED = {1, 8453, 137, 42161, 56}
 WRAPPED = {1: "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
            8453: "0x4200000000000000000000000000000000000006",
            42161: "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"}
@@ -66,8 +66,17 @@ def check(f, user, now):
     exp_out = WRAPPED[tc] if native else to
     if addr(wa[2]) != exp_in: return "input token " + addr(wa[2])
     if addr(wa[3]) != exp_out: return "output token " + addr(wa[3])
-    to_amount = int(est["toAmount"])
+    to_amount = int(est["toAmount"]); to_min = int(est["toAmountMin"])
     if wa[4] != to_amount: return "output amount != quote"
+    # decimals of the two tokens: outputAmountPercent = output/input in RAW units * 1e18, so it is scaled by the difference
+    fd, td = int(act["fromToken"]["decimals"]), int(act["toToken"]["decimals"])
+    s_in, s_out = 10 ** fd, 10 ** td
+    percent = wa[5] * s_in // s_out
+    if wa[5] <= 0 or percent > 10 ** 18 or percent < 9 * 10 ** 17: return f"output percent out of range ({percent})"
+    min_amount = int(b["minAmount"])
+    if to_amount <= 0 or to_amount * s_in > min_amount * s_out: return "toAmount inconsistent"
+    if to_min <= 0 or to_min > to_amount: return "toAmountMin inconsistent"
+    if to_min * s_in * 100 < amount * 95 * s_out: return "fees over 5%"
     return None
 
 if __name__ == "__main__":

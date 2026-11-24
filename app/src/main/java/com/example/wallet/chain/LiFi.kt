@@ -331,7 +331,9 @@ object LiFiGuard {
         if (!same(addrOf(a[2]), wrappedIn ?: fromToken)) return "The deposit uses a different input token"
         if (!same(addrOf(a[3]), wrappedOut ?: r.toToken)) return "The deposit pays out a different token"
         if (a[4] != q.toAmount) return "The deposit output doesn't match the quote"
-        if (a[5].signum() <= 0 || a[5] > ONE_E18 || a[5] < MIN_OUTPUT_PERCENT) return "The deposit output percentage is out of range"
+        // outputAmountPercent is output/input in RAW units times 1e18, so it is scaled by the decimals difference (BNB Chain USDC: 18, Arbitrum: 6).
+        val percent = a[5].multiply(BigInteger.TEN.pow(r.fromDecimals)).divide(BigInteger.TEN.pow(r.toDecimals))
+        if (a[5].signum() <= 0 || percent > ONE_E18 || percent < MIN_OUTPUT_PERCENT) return "The deposit output percentage is out of range"
         if (a[6].bitLength() > 160) return "Invalid relayer address in the deposit"
         val timestamp = a[7]
         val fillDeadline = a[8]

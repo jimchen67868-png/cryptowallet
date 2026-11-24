@@ -63,7 +63,7 @@ class LiFiCaptureTest {
         assertNull(verdict("bnb_to_arb_usdc", req(56, 42161, usdcBnb, usdcArb, "2000000000000000000", 18, 6)))
         assertNull(verdict("arb_to_bnb_usdc", req(42161, 56, usdcArb, usdcBnb, usdc2, 6, 18)))
         // without the decimals the amounts look 1e12 apart: the guard must not accept that by accident
-        refused("fees", "bnb_to_arb_usdc", req(56, 42161, usdcBnb, usdcArb, "2000000000000000000"))
+        refused("out of range", "bnb_to_arb_usdc", req(56, 42161, usdcBnb, usdcArb, "2000000000000000000"))
     }
 
     // ---- real native-coin quotes are accepted ----

@@ -64,7 +64,10 @@ class CcipTest {
         assertTrue("native coins cannot go through CCIP", CcipTestnet.candidateAssets(SwapAsset(null, "ETH", 18), Chain.ETH, Chain.BNB).isEmpty())
         assertTrue(CcipTestnet.candidateAssets(SwapAsset("0x0000000000000000000000000000000000000abc", "X", 18), Chain.ETH, Chain.BNB).isEmpty())
         assertTrue("wrong chain's BnM", CcipTestnet.candidateAssets(SwapAsset(bnb.bnm, "CCIP-BnM", 18), Chain.ETH, Chain.BNB).isEmpty())
-        assertTrue(CcipTestnet.candidateAssets(bnmOnSepolia, Chain.ETH, Chain.BASE).isEmpty())
+        // Base Sepolia and Arbitrum Sepolia are CCIP lanes too: BnM arrives as that network's BnM
+        assertEquals(listOf(SwapAsset(CcipTestnet.BASE_SEPOLIA.bnm, "CCIP-BnM", 18)), CcipTestnet.candidateAssets(bnmOnSepolia, Chain.ETH, Chain.BASE))
+        assertEquals(listOf(SwapAsset(CcipTestnet.ARBITRUM_SEPOLIA.bnm, "CCIP-BnM", 18)), CcipTestnet.candidateAssets(bnmOnSepolia, Chain.ETH, Chain.ARB))
+        assertTrue("no CCIP lane configured for Polygon Amoy", CcipTestnet.candidateAssets(bnmOnSepolia, Chain.ETH, Chain.POL).isEmpty())
         assertTrue(CcipTestnet.candidateAssets(bnmOnSepolia, Chain.ETH, Chain.ETH).isEmpty())
     }
 
@@ -72,7 +75,9 @@ class CcipTest {
         assertEquals(listOf(SwapAsset(null, "ETH", 18)), TestnetRoutes.candidateAssets(SwapAsset(null, "ETH", 18), Chain.ETH, Chain.BASE))
         assertTrue("no Relay lane to BNB testnet", TestnetRoutes.candidateAssets(SwapAsset(null, "ETH", 18), Chain.ETH, Chain.BNB).isEmpty())
         assertEquals(listOf(SwapAsset(bnb.bnm, "CCIP-BnM", 18)), TestnetRoutes.candidateAssets(SwapAsset(sepolia.bnm, "CCIP-BnM", 18), Chain.ETH, Chain.BNB))
-        assertTrue(TestnetRoutes.candidateAssets(SwapAsset(sepolia.bnm, "CCIP-BnM", 18), Chain.ETH, Chain.BASE).isEmpty())
+        // the BnM token to Base Sepolia goes through CCIP (Relay only carries native ETH)
+        assertEquals(listOf(SwapAsset(CcipTestnet.BASE_SEPOLIA.bnm, "CCIP-BnM", 18)), TestnetRoutes.candidateAssets(SwapAsset(sepolia.bnm, "CCIP-BnM", 18), Chain.ETH, Chain.BASE))
+        assertTrue(TestnetRoutes.candidateAssets(SwapAsset(sepolia.bnm, "CCIP-BnM", 18), Chain.ETH, Chain.POL).isEmpty())
     }
 
     // ---- calldata: golden values from the independent Python encoder ----
