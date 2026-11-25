@@ -211,7 +211,10 @@ THORChain had halted BNB Chain trading, in which case the quote is refused. Not 
 (handled: see below), USDT-TRON, Solana/Arbitrum/Polygon, and testnets (THORChain has no matching public testnet).
 How it is made safe against a bad API (the vault address and memo decide where funds go):
 - the memo (`=:ASSET:YOUR_ADDRESS:MIN_OUT`) is built in the app; the API's memo is only compared with ours;
-- the inbound vault must be identical on at least two of three independent THORNode endpoints, checked again right before signing;
+- the inbound vault must be identical on at least two THORChain data sources, checked again right before signing. **Honest limit:** Nine Realms
+  retired its public endpoints in April 2026, so the sources are now Liquify's THORNode API and Liquify's Midgard (`gateway.liquify.com`), requests carry an
+  `x-client-id` header: two services but ONE operator, so a compromise of that operator would not be caught. If you know other keyless, independent public
+  THORNode/Midgard endpoints, add them to `ThorApi.DEFAULT_SOURCES`; the rule applies unchanged. A refusal now lists which source failed and why;
 - refused: paused/halted chains, quotes close to expiry, amounts under the quote's minimum, fees over 5% of the swap;
 - minimum output is 1% under the quote; if the price moves more, or the swap fails, THORChain refunds the input minus fees.
 Litecoin: three outputs (vault, change, OP_RETURN memo, max 80 bytes). Tron: memo in `raw_data.data`; Tron burns an extra network
@@ -247,6 +250,12 @@ If there is none, the quote says "No usable SunSwap V2 pool found" and lists wha
 **Litecoin has no tokens or exchange on its own network**, so there is nothing to swap "within" Litecoin; LTC swaps are the THORChain
 cross-chain ones above.
 Verified here: selectors (keccak) and calldata against an independent Python encoder. **Not run live.**
+
+### Same-network swaps on BNB Chain testnet (PancakeSwap v2)
+The BNB testnet card has **Swap**: tBNB ↔ the BUSD test token and any token you add, through PancakeSwap V2 (a Uniswap V2 fork), using the same Uniswap v2
+code as Sepolia (quote from the router on chain, exact approval, 1% minimum output, deposit/withdraw for tBNB ↔ WBNB). Router and WBNB come from
+PancakeSwap's published testnet deployment, found in several independent references, and pass their EIP-55 checksums; the wallet reads the router's own
+`WETH()` on chain instead of trusting the constant. Whether a given testnet pool has liquidity is unknown: the quote tells you if a pair has no pool; then add a token that has a pool (testnet.pancakeswap.finance lists them) or create one.
 
 ### Testnet one-way transfers between EVM networks (CCIP-BnM)
 The free **CCIP-BnM** test token now moves one way (or back) between **Sepolia, BNB testnet, Base Sepolia and Arbitrum Sepolia** through

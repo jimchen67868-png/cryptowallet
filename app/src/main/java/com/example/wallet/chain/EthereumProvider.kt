@@ -51,7 +51,7 @@ class EthereumProvider(
     private val uniswap: UniswapV3Config? = null,
     /** Across bridge routes (mainnets only). The route for this chain's own id must be among them. */
     private val bridgeRoutes: List<BridgeRoute> = emptyList(),
-    /** Uniswap v2 router, tried alongside [uniswap] on testnets. Only used when [uniswap] is set too. */
+    /** Uniswap v2 (or a fork such as PancakeSwap v2): tried alongside [uniswap] on testnets, or used alone when [uniswap] is null. */
     private val uniswapV2: UniswapV2Config? = null,
     /** Bridge TEST ETH to the other Relay testnet (Sepolia <-> Base Sepolia). Never set on mainnet. */
     private val relayTestnet: Boolean = false,
@@ -218,10 +218,11 @@ class EthereumProvider(
 
     // ---- swaps (ParaSwap) ----
 
-    override val supportsSwap: Boolean get() = swapNetworkId != null || uniswap != null
+    override val supportsSwap: Boolean get() = swapNetworkId != null || uniswap != null || uniswapV2 != null
     override val swapProviderName: String
         get() = when {
             swapNetworkId != null -> "ParaSwap"
+            uniswap == null && uniswapV2 != null -> uniswapV2.name
             uniswapV2 != null -> "Uniswap v3 and v2"
             else -> "Uniswap v3"
         }
@@ -237,7 +238,7 @@ class EthereumProvider(
         val custom = tokenStore.list(chain)
             .filter { it.address.lowercase() !in have }
             .map { SwapAsset(it.address, it.symbol, it.decimals, curated = false) }
-        val weth = uniswap?.weth
+        val weth = (uniswap?.weth ?: if (uniswap == null) uniswapV2?.wrapped else null)
             ?.takeIf { w -> (curated + custom).none { it.id.equals(w, ignoreCase = true) } }
             ?.let { SwapAsset(it, "WETH", 18) }
         return curated + listOfNotNull(weth) + custom
@@ -646,7 +647,7 @@ class EthereumProvider(
     private suspend fun quoteUniswap(
         userAddress: String, from: SwapAsset, to: SwapAsset, amount: BigDecimal
     ): SwapQuote = withContext(Dispatchers.IO) {
-        val cfg = uniswap ?: throw UnsupportedOperationException("Swaps are not available on ${chain.label} $networkName")
+        val cfg = uniswap ?: return@withContext quoteV2Only(userAddress, from, to, amount)
         require(SwapGuard.tokenKey(from) != SwapGuard.tokenKey(to)) { "Choose two different assets" }
         val raw = rawAmount(amount, from.decimals)
         // ETH <-> WETH is a 1:1 wrap/unwrap on the WETH contract: no pool, no slippage.
@@ -677,7 +678,7 @@ class EthereumProvider(
     }
 
     private suspend fun executeUniswap(seed: ByteArray, quote: SwapQuote): SwapResult = withContext(Dispatchers.IO) {
-        val cfg = uniswap ?: throw UnsupportedOperationException("Swaps are not available on ${chain.label} $networkName")
+        val cfg = uniswap ?: return@withContext executeV2Only(seed, quote)
         val creds = credentials(seed)
         val user = creds.address
         val txManager = RawTransactionManager(web3, creds, chainId)
@@ -730,6 +731,39 @@ class EthereumProvider(
         }
         val value = if (srcToken == null) amount else BigInteger.ZERO
         SwapResult(approvals, sendCall(txManager, user, cfg.router, value, data))
+    }
+
+    // ---- networks that have a v2 router only (BNB Chain testnet: PancakeSwap v2) ----
+
+    private fun quoteV2Only(user: String, from: SwapAsset, to: SwapAsset, amount: BigDecimal): SwapQuote {
+        val v2 = uniswapV2 ?: throw UnsupportedOperationException("Swaps are not available on ${chain.label} $networkName")
+        require(SwapGuard.tokenKey(from) != SwapGuard.tokenKey(to)) { "Choose two different assets" }
+        val raw = rawAmount(amount, from.decimals)
+        val weth = v2Weth // read from the router itself
+        // Native coin <-> its wrapped form is a 1:1 deposit/withdraw on the wrapped-coin contract: no pool, no slippage.
+        if ((from.id == null && to.id.equals(weth, ignoreCase = true)) || (to.id == null && from.id.equals(weth, ignoreCase = true))) {
+            return SwapQuote(chain, from, to, raw, raw, 0, false, null)
+        }
+        val (_, out) = bestV2Quote(v2, from, to, raw)
+        val needsApproval = from.id != null && allowance(from.id, user, v2.router) < raw
+        return SwapQuote(chain, from, to, raw, out, UNISWAP_SLIPPAGE_BPS, needsApproval, null, v2.name)
+    }
+
+    private fun executeV2Only(seed: ByteArray, quote: SwapQuote): SwapResult {
+        val v2 = uniswapV2 ?: throw UnsupportedOperationException("Swaps are not available on ${chain.label} $networkName")
+        val creds = credentials(seed)
+        val user = creds.address
+        val txManager = RawTransactionManager(web3, creds, chainId)
+        val weth = v2Weth
+        val amount = quote.amountInRaw
+        if (quote.from.id == null && quote.to.id.equals(weth, ignoreCase = true)) {
+            return SwapResult(emptyList(), sendCall(txManager, user, weth, amount, UniswapV3Abi.wethDeposit()))
+        }
+        if (quote.to.id == null && quote.from.id.equals(weth, ignoreCase = true)) {
+            return SwapResult(emptyList(), sendCall(txManager, user, weth, BigInteger.ZERO, UniswapV3Abi.wethWithdraw(amount)))
+        }
+        check(v2.name == quote.venue) { "Quote is for another venue" }
+        return executeUniswapV2(txManager, user, quote)
     }
 
     /** The router's own WETH (v2 and v3 deployments on a testnet do not share one). Re-read if a lookup failed. */

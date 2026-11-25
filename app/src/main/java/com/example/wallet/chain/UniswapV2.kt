@@ -6,11 +6,30 @@ import java.math.BigInteger
  * A Uniswap v2 deployment: just the UniswapV2Router02. Its WETH is read from the router on-chain (`WETH()`) rather
  * than hardcoded, because v2 and v3 deployments on the same testnet do not share a WETH.
  */
-class UniswapV2Config(val router: String)
+class UniswapV2Config(
+    val router: String,
+    /** Shown to the user as the swap venue. */
+    val name: String = "Uniswap v2",
+    /** The wrapped native coin, listed as a swappable asset on a network that has no Uniswap v3 config. The router's own WETH() is what is used. */
+    val wrapped: String? = null
+)
 
 /** Official Uniswap v2 deployments (docs.uniswap.org). Uniswap publishes none for Base Sepolia or Arbitrum Sepolia. */
 object UniswapV2Deployments {
     val SEPOLIA = UniswapV2Config(router = "0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3")
+
+    /**
+     * PancakeSwap V2 on BNB Chain testnet: a Uniswap V2 fork (same router ABI), deployed and announced by PancakeSwap. Router, factory
+     * (0x6725F303b657a9451d8BA641348b6761A6CC7a17) and WBNB were found in several independent references; all pass their EIP-55 checksums.
+     * Pool liquidity on a testnet is not guaranteed: the quote says so if a pair has none.
+     */
+    val PANCAKE_BSC_TESTNET = UniswapV2Config(
+        router = "0xD99D1c33F9fC3444f8101754aBC46c52416550D1",
+        name = "PancakeSwap v2",
+        wrapped = "0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd"
+    )
+    /** BUSD test token used with that router's WBNB pool. */
+    const val BSC_TESTNET_BUSD = "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7"
 }
 
 /**

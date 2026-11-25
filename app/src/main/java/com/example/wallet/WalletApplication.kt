@@ -54,7 +54,7 @@ class AppContainer(context: Context) {
         testnetName: String, known: List<TokenInfo>, historyApi: String?, explorerTx: String,
         swapId: Int? = null, uniswap: UniswapV3Config? = null,
         bridgeRoutes: List<BridgeRoute> = emptyList(), relayTestnet: Boolean = false, ccipTestnet: Boolean = false,
-        thor: com.example.wallet.chain.ThorSwaps? = null
+        thor: com.example.wallet.chain.ThorSwaps? = null, uniswapV2: com.example.wallet.chain.UniswapV2Config? = null
     ) = EthereumProvider(
         tokenStore = tokens,
         rpcUrl = rpc,
@@ -70,7 +70,8 @@ class AppContainer(context: Context) {
         bridgeRoutes = bridgeRoutes,
         relayTestnet = relayTestnet,
         ccipTestnet = ccipTestnet,
-        thor = thor
+        thor = thor,
+        uniswapV2 = uniswapV2
     )
 
     private val testnetProviders: List<ChainProvider> by lazy {
@@ -88,8 +89,12 @@ class AppContainer(context: Context) {
             evm(Chain.POL, "https://polygon-amoy-bor-rpc.publicnode.com", 80002L, testnetTokens, true,
                 "Amoy testnet", emptyList(), null, "https://amoy.polygonscan.com/tx/"),
             evm(Chain.BNB, "https://bsc-testnet-rpc.publicnode.com", 97L, testnetTokens, true,
-                "Testnet", listOf(com.example.wallet.data.TokenInfo(CcipTestnet.BNB_TESTNET.bnm, CcipTestnet.BNM_SYMBOL, CcipTestnet.BNM_DECIMALS)),
-                null, "https://testnet.bscscan.com/tx/", ccipTestnet = true)
+                "Testnet", listOf(
+                    com.example.wallet.data.TokenInfo(CcipTestnet.BNB_TESTNET.bnm, CcipTestnet.BNM_SYMBOL, CcipTestnet.BNM_DECIMALS),
+                    com.example.wallet.data.TokenInfo(com.example.wallet.chain.UniswapV2Deployments.BSC_TESTNET_BUSD, "BUSD", 18)
+                ),
+                null, "https://testnet.bscscan.com/tx/", ccipTestnet = true,
+                uniswapV2 = com.example.wallet.chain.UniswapV2Deployments.PANCAKE_BSC_TESTNET)
         )
     }
 

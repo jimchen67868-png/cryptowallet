@@ -15,7 +15,10 @@ import java.math.BigInteger
  * Trust model, and why it is built this way: the vault address and the memo decide where the funds go, and both come
  * from a web API. So:
  *  - the memo is built here, never taken from the API (the API's memo is only compared against ours);
- *  - the vault address must be identical on at least two independently operated THORChain nodes ([ThorQuorum]);
+ *  - the vault address must be identical on at least two THORChain data sources ([ThorQuorum]). Honest limit: since Nine Realms retired
+ *    its public endpoints (April 2026) the only keyless public THORChain gateway found is Liquify's, which serves both the THORNode API
+ *    and Midgard: two services, but ONE operator, so a compromise of that operator would not be caught. More independent sources
+ *    can be added in [ThorApi.DEFAULT_SOURCES] and the rule applies unchanged;
  *  - paused/halted chains, expired quotes, amounts below the quote's minimum and unusually high fees are refused;
  *  - the output has a minimum ([ThorGuard.SLIPPAGE_BPS]); if the price moves further THORChain refunds the input.
  * Mainnet only: THORChain has no public testnet that matches Litecoin/Tron testnets.
@@ -116,6 +119,9 @@ class ThorQuoteData(
 )
 
 object ThorParse {
+    /** A missing or JSON-null field is "". (Android's org.json would otherwise turn a JSON null into the text "null".) */
+    private fun JSONObject.str(key: String): String = if (isNull(key)) "" else optString(key, "")
+
     /** Throws with the node's own message if the response is an error. */
     fun quote(j: JSONObject): ThorQuoteData {
         if (j.has("error") || (j.has("message") && !j.has("expected_amount_out"))) {
@@ -124,14 +130,14 @@ object ThorParse {
         fun big(name: String): BigInteger = j.optString(name, "").toBigIntegerOrNull() ?: BigInteger.ZERO
         val fees = j.optJSONObject("fees")
         return ThorQuoteData(
-            inboundAddress = j.optString("inbound_address", ""),
-            memo = j.optString("memo", "").ifEmpty { null },
+            inboundAddress = j.str("inbound_address"),
+            memo = j.str("memo").ifEmpty { null },
             expiry = j.optLong("expiry", 0L),
             expectedOut = big("expected_amount_out"),
             feesTotal = fees?.optString("total", "")?.toBigIntegerOrNull() ?: BigInteger.ZERO,
             minIn = big("recommended_min_amount_in"),
             etaSeconds = j.optLong("total_swap_seconds", 0L),
-            router = j.optString("router", "")
+            router = j.str("router")
         )
     }
 
@@ -141,10 +147,10 @@ object ThorParse {
             if (o.optString("chain") != chainCode) continue
             return ThorInbound(
                 chain = chainCode,
-                address = o.optString("address", ""),
+                address = o.str("address"),
                 halted = o.optBoolean("halted", false),
                 tradingPaused = o.optBoolean("chain_trading_paused", false) || o.optBoolean("global_trading_paused", false),
-                router = o.optString("router", "")
+                router = o.str("router")
             )
         }
         return null
@@ -158,10 +164,10 @@ object ThorQuorum {
     /** The agreed inbound, or an error message. `null` entries are nodes that did not answer. */
     fun agree(responses: List<ThorInbound?>): Pair<ThorInbound?, String?> {
         val got = responses.filterNotNull()
-        if (got.size < MIN_NODES) return null to "Could not confirm the THORChain vault with $MIN_NODES independent nodes. Nothing was sent."
+        if (got.size < MIN_NODES) return null to "Could not confirm the THORChain vault with $MIN_NODES data sources. Nothing was sent."
         if (got.any { it.address.isEmpty() }) return null to "THORChain has no inbound address for this network right now."
-        if (got.map { it.address.lowercase() }.toSet().size != 1) return null to "THORChain nodes disagree about the vault address. Nothing was sent."
-        if (got.map { it.router.lowercase() }.toSet().size != 1) return null to "THORChain nodes disagree about the router contract. Nothing was sent."
+        if (got.map { it.address.lowercase() }.toSet().size != 1) return null to "THORChain data sources disagree about the vault address. Nothing was sent."
+        if (got.map { it.router.lowercase() }.toSet().size != 1) return null to "THORChain data sources disagree about the router contract. Nothing was sent."
         if (got.any { it.halted || it.tradingPaused }) return null to "THORChain has paused this network right now."
         return got.first() to null
     }
@@ -214,23 +220,40 @@ class ThorPlan(
     val tokenDecimals: Int = 18
 )
 
-/** THORNode REST API (keyless). Several independent endpoints so that no single one can choose the vault. */
+/** One public THORChain data source. THORNode serves `/thorchain/...`; Midgard serves the same inbound data under `/v2/thorchain/...`. */
+class ThorSource(val baseUrl: String, val label: String, val midgard: Boolean = false) {
+    val inboundUrl: String get() = baseUrl + (if (midgard) "/v2/thorchain/inbound_addresses" else "/thorchain/inbound_addresses")
+}
+
+/**
+ * THORChain public API (keyless, but the public gateways ask clients to identify themselves with an `x-client-id` header).
+ * The vault must be confirmed by [ThorQuorum.MIN_NODES] sources; quotes come from the first THORNode (non-Midgard) source that answers.
+ */
 open class ThorApi(
-    private val nodes: List<String> = DEFAULT_NODES
+    private val sources: List<ThorSource> = DEFAULT_SOURCES
 ) {
     open fun inbound(vaultChain: String): Pair<ThorInbound?, String?> {
-        val answers = nodes.map { node ->
-            runCatching { ThorParse.inbound(JSONArray(Http.get("$node/thorchain/inbound_addresses")), vaultChain) }.getOrNull()
+        val failures = ArrayList<String>()
+        val answers = sources.map { s ->
+            try {
+                ThorParse.inbound(JSONArray(Http.get(s.inboundUrl, HEADERS)), vaultChain)
+                    ?: run { failures.add("${s.label}: no $vaultChain entry"); null }
+            } catch (e: Exception) {
+                failures.add("${s.label}: ${(e.message ?: e.javaClass.simpleName).take(90)}")
+                null
+            }
         }
-        return ThorQuorum.agree(answers)
+        val (inbound, err) = ThorQuorum.agree(answers)
+        // Say which sources failed and why, so a dead endpoint is visible instead of a bare refusal.
+        return inbound to (if (err != null && failures.isNotEmpty()) "$err (${failures.joinToString("; ")})" else err)
     }
 
     open fun quote(from: String, to: String, amount: BigInteger, destination: String): ThorQuoteData {
         var last: Exception? = null
-        for (node in nodes) {
+        for (s in sources.filter { !it.midgard }) {
             try {
-                val url = "$node/thorchain/quote/swap?from_asset=$from&to_asset=$to&amount=$amount&destination=$destination"
-                return ThorParse.quote(JSONObject(Http.get(url)))
+                val url = "${s.baseUrl}/thorchain/quote/swap?from_asset=$from&to_asset=$to&amount=$amount&destination=$destination"
+                return ThorParse.quote(JSONObject(Http.get(url, HEADERS)))
             } catch (e: Exception) {
                 last = e
             }
@@ -239,11 +262,12 @@ open class ThorApi(
     }
 
     companion object {
-        /** Public THORNode endpoints seen in THORChain documentation; the quorum rule works with any two that answer. */
-        val DEFAULT_NODES = listOf(
-            "https://thornode.ninerealms.com",
-            "https://thornode.thorchain.info",
-            "https://public-thornode.nativeswap.io"
+        private val HEADERS = mapOf("x-client-id" to "cryptowallet-android", "Accept" to "application/json")
+
+        /** Liquify's public gateway (the one THORChain's docs and other wallets switched to): THORNode API and Midgard. */
+        val DEFAULT_SOURCES = listOf(
+            ThorSource("https://gateway.liquify.com/chain/thorchain_api", "Liquify THORNode"),
+            ThorSource("https://gateway.liquify.com/chain/thorchain_midgard", "Liquify Midgard", midgard = true)
         )
     }
 }
@@ -290,7 +314,7 @@ class ThorSwaps(
         val left = plan.expirySec - clockSec()
         return "THORChain DRY RUN, nothing was signed or sent.\n\n" +
             "Checks passed just now:\n" +
-            "- vault address agreed by at least ${ThorQuorum.MIN_NODES} independent nodes\n" +
+            "- vault address agreed by at least ${ThorQuorum.MIN_NODES} THORChain data sources\n" +
             "- chain not paused, quote not expired (${left / 60} min ${left % 60} s left)\n" +
             "- amount above the quote's minimum, fees within ${ThorGuard.MAX_FEE_PERCENT}%\n\n" +
             "Vault: ${plan.vault}\n" +
@@ -315,7 +339,7 @@ class ThorSwaps(
             payload = plan, destAddress = plan.destAddress,
             note = "Swapped by THORChain, a decentralised exchange network. The wallet sends your ${plan.from.symbol} to THORChain's " +
                 "current vault with a memo naming YOUR ${plan.dest.label} address; the vault address was confirmed by " +
-                "${ThorQuorum.MIN_NODES} independent nodes. Usually takes 5 to 60 minutes. If the price moves more than " +
+                "${ThorQuorum.MIN_NODES} THORChain data sources. Usually takes 5 to 60 minutes. If the price moves more than " +
                 "${ThorGuard.SLIPPAGE_BPS / 100}% before it is processed, or the swap fails, THORChain refunds the ${plan.from.symbol} " +
                 "to you minus fees. This cannot be undone."
         )

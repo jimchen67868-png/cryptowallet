@@ -344,6 +344,30 @@ class ThorTest {
         try { ThorRouter.depositWithExpiry(evmVault, big("5"), "=:BTC.BTC:x:1", 1L, "usdc"); fail() } catch (e: IllegalArgumentException) { }
     }
 
+    // ---- data sources ----
+
+    @Test fun defaultSources_areTheLiquifyGateway_notTheRetiredNineRealmsHosts() {
+        val urls = ThorApi.DEFAULT_SOURCES.map { it.inboundUrl }
+        assertEquals(
+            listOf(
+                "https://gateway.liquify.com/chain/thorchain_api/thorchain/inbound_addresses",
+                "https://gateway.liquify.com/chain/thorchain_midgard/v2/thorchain/inbound_addresses"
+            ), urls
+        )
+        assertTrue("Nine Realms retired these hosts in April 2026", urls.none { it.contains("ninerealms") })
+        assertEquals("at least as many sources as the quorum needs", true, ThorApi.DEFAULT_SOURCES.size >= ThorQuorum.MIN_NODES)
+        assertEquals(listOf(false, true), ThorApi.DEFAULT_SOURCES.map { it.midgard })
+    }
+
+    @Test fun midgardInboundJson_parsesLikeThorNodes() {
+        // Midgard's /v2/thorchain/inbound_addresses mirrors THORNode's array of per-chain entries
+        val arr = JSONArray("""[{"address":"$vault","chain":"LTC","halted":false,"chain_trading_paused":false,"global_trading_paused":false,"router":null}]""")
+        val i = ThorParse.inbound(arr, "LTC")!!
+        assertEquals(vault, i.address)
+        assertEquals("", i.router)   // a JSON null router must read as "no router", not the string "null"
+        assertFalse(i.halted)
+    }
+
     // ---- OP_RETURN and coin selection ----
 
     @Test fun opReturn_scriptAndSize() {
