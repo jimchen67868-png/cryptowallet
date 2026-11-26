@@ -277,6 +277,11 @@ externally audited. **Not built**: the Station API (quotes, solver address, reve
 SDK source can't be read automatically, and the solver gateway uses scoped API keys (test keys for testnet), so keyless access is unconfirmed.
 `tools/capture_train.sh` reads the public web app to find the API address and endpoint names; paste its output to continue.
 
+## Screenshots are blocked on purpose
+The app sets `FLAG_SECURE`, so Android blocks screenshots and screen recording (a screenshot could capture a recovery phrase). To share what you see:
+every message (errors, status) has a **Copy** action in its bar, the swap **Dry run** report has a **Copy** button, and the crash report screen has one too.
+Paste it into a chat or a note. Messages and reports never contain your recovery phrase or PIN.
+
 ## Typing amounts
 Amount boxes accept a dot or a comma as the decimal separator ("0.01" or "0,01"), spaces and 1,234.56-style thousands separators (`AmountParser`).
 Earlier builds only understood a dot and answered "Enter a valid amount" to a comma.

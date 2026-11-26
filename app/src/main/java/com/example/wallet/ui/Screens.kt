@@ -71,9 +71,12 @@ import com.google.zxing.qrcode.QRCodeWriter
 @Composable
 fun WalletRoot(vm: WalletViewModel, activity: FragmentActivity) {
     val snackbar = remember { SnackbarHostState() }
+    val clipboard = LocalClipboardManager.current
     LaunchedEffect(vm.message) {
         vm.message?.let {
-            snackbar.showSnackbar(it)
+            // The app blocks screenshots (they could capture a recovery phrase), so every message can be copied and pasted instead.
+            val result = snackbar.showSnackbar(it, actionLabel = "Copy", duration = androidx.compose.material3.SnackbarDuration.Long)
+            if (result == androidx.compose.material3.SnackbarResult.ActionPerformed) clipboard.setText(AnnotatedString(it))
             vm.clearMessage()
         }
     }
@@ -674,7 +677,8 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
             onDismissRequest = vm::closeDryRun,
             title = { Text("Dry run") },
             text = { Text(report, modifier = Modifier.verticalScroll(rememberScrollState()), style = MaterialTheme.typography.bodySmall) },
-            confirmButton = { TextButton(onClick = vm::closeDryRun) { Text("OK") } }
+            confirmButton = { TextButton(onClick = vm::closeDryRun) { Text("OK") } },
+            dismissButton = { val cb = LocalClipboardManager.current; TextButton(onClick = { cb.setText(AnnotatedString(report)) }) { Text("Copy") } }
         )
     }
 }
