@@ -346,17 +346,18 @@ class ThorTest {
 
     // ---- data sources ----
 
-    @Test fun defaultSources_areTheLiquifyGateway_notTheRetiredNineRealmsHosts() {
+    @Test fun defaultSources_areTwoOperators_notTheRetiredNineRealmsHosts() {
         val urls = ThorApi.DEFAULT_SOURCES.map { it.inboundUrl }
         assertEquals(
             listOf(
                 "https://gateway.liquify.com/chain/thorchain_api/thorchain/inbound_addresses",
-                "https://gateway.liquify.com/chain/thorchain_midgard/v2/thorchain/inbound_addresses"
+                "https://rest.cosmos.directory/thorchain/thorchain/inbound_addresses"
             ), urls
         )
         assertTrue("Nine Realms retired these hosts in April 2026", urls.none { it.contains("ninerealms") })
-        assertEquals("at least as many sources as the quorum needs", true, ThorApi.DEFAULT_SOURCES.size >= ThorQuorum.MIN_NODES)
-        assertEquals(listOf(false, true), ThorApi.DEFAULT_SOURCES.map { it.midgard })
+        assertTrue("at least as many sources as the quorum needs", ThorApi.DEFAULT_SOURCES.size >= ThorQuorum.MIN_NODES)
+        assertEquals("different hosts", 2, ThorApi.DEFAULT_SOURCES.map { java.net.URI(it.baseUrl).host }.toSet().size)
+        assertTrue("quotes need a THORNode source", ThorApi.DEFAULT_SOURCES.any { !it.midgard })
     }
 
     @Test fun midgardInboundJson_parsesLikeThorNodes() {

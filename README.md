@@ -212,9 +212,11 @@ THORChain had halted BNB Chain trading, in which case the quote is refused. Not 
 How it is made safe against a bad API (the vault address and memo decide where funds go):
 - the memo (`=:ASSET:YOUR_ADDRESS:MIN_OUT`) is built in the app; the API's memo is only compared with ours;
 - the inbound vault must be identical on at least two THORChain data sources, checked again right before signing. **Honest limit:** Nine Realms
-  retired its public endpoints in April 2026, so the sources are now Liquify's THORNode API and Liquify's Midgard (`gateway.liquify.com`), requests carry an
-  `x-client-id` header: two services but ONE operator, so a compromise of that operator would not be caught. If you know other keyless, independent public
-  THORNode/Midgard endpoints, add them to `ThorApi.DEFAULT_SOURCES`; the rule applies unchanged. A refusal now lists which source failed and why;
+  retired its public endpoints in April 2026, so the sources are now Liquify's public gateway (`gateway.liquify.com`) and the cosmos.directory proxy (EcoStake,
+  `rest.cosmos.directory/thorchain`), two different operators; requests carry an `x-client-id` header. Probed from a phone on 2026-11-25: Liquify and cosmos.directory
+  answered, Liquify's Midgard has no inbound path (404), the THORSwap hosts returned 403 and others did not resolve. The proxy forwards to several public upstreams from the
+  Cosmos chain registry, so if one of them is Liquify the two are not fully independent; a lying source causes a disagreement and a refusal, never a send. Add more to
+  `ThorApi.DEFAULT_SOURCES` if you find them. A refusal lists which source failed and why;
 - refused: paused/halted chains, quotes close to expiry, amounts under the quote's minimum, fees over 5% of the swap;
 - minimum output is 1% under the quote; if the price moves more, or the swap fails, THORChain refunds the input minus fees.
 Litecoin: three outputs (vault, change, OP_RETURN memo, max 80 bytes). Tron: memo in `raw_data.data`; Tron burns an extra network

@@ -15,9 +15,11 @@ import java.math.BigInteger
  * Trust model, and why it is built this way: the vault address and the memo decide where the funds go, and both come
  * from a web API. So:
  *  - the memo is built here, never taken from the API (the API's memo is only compared against ours);
- *  - the vault address must be identical on at least two THORChain data sources ([ThorQuorum]). Honest limit: since Nine Realms retired
- *    its public endpoints (April 2026) the only keyless public THORChain gateway found is Liquify's, which serves both the THORNode API
- *    and Midgard: two services, but ONE operator, so a compromise of that operator would not be caught. More independent sources
+ *  - the vault address must be identical on at least two THORChain data sources run by different parties ([ThorQuorum]): Liquify's
+ *    public gateway and the cosmos.directory proxy (EcoStake), which forwards to public THORNode endpoints listed in the Cosmos chain
+ *    registry. Honest limits: Nine Realms retired its endpoints (April 2026) and most other public ones answered 403/404 or did not
+ *    resolve when probed, so there are only these two; the proxy picks among several upstream providers, and if one of them is
+ *    Liquify the sources are not fully independent. A lying source causes a disagreement and a refusal, never a send. More sources
  *    can be added in [ThorApi.DEFAULT_SOURCES] and the rule applies unchanged;
  *  - paused/halted chains, expired quotes, amounts below the quote's minimum and unusually high fees are refused;
  *  - the output has a minimum ([ThorGuard.SLIPPAGE_BPS]); if the price moves further THORChain refunds the input.
@@ -264,10 +266,14 @@ open class ThorApi(
     companion object {
         private val HEADERS = mapOf("x-client-id" to "cryptowallet-android", "Accept" to "application/json")
 
-        /** Liquify's public gateway (the one THORChain's docs and other wallets switched to): THORNode API and Midgard. */
+        /**
+         * Both serve the THORNode REST API. Liquify's gateway is the one THORChain's docs and other wallets switched to. The cosmos.directory
+         * proxy (EcoStake) answered HTTP 200 from a phone on 2026-11-25; Liquify's Midgard has no inbound-address path (404) and the
+         * THORSwap hosts returned 403, so they are not used.
+         */
         val DEFAULT_SOURCES = listOf(
             ThorSource("https://gateway.liquify.com/chain/thorchain_api", "Liquify THORNode"),
-            ThorSource("https://gateway.liquify.com/chain/thorchain_midgard", "Liquify Midgard", midgard = true)
+            ThorSource("https://rest.cosmos.directory/thorchain", "cosmos.directory THORNode")
         )
     }
 }
