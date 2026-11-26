@@ -44,7 +44,8 @@ class ThorTest {
         val ltc = "ltc1qjmxnz78nmc8nq77wuxh25n2es7rzm5c2rkk4wh"
         val evm = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
         val tron = "TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH"
-        for ((asset, dest) in listOf("LTC.LTC" to ltc, "BTC.BTC" to btcDest, "ETH.ETH" to evm, "BASE.ETH" to evm, "TRON.TRX" to tron)) {
+        val sol = "DYw8jCTfwHNRJhhmFcbXvVDTqWMEVFBX6ZKUmG5CNSKK" // 44 characters: the longest Base58 address we ever put in a memo
+        for ((asset, dest) in listOf("LTC.LTC" to ltc, "BTC.BTC" to btcDest, "ETH.ETH" to evm, "BASE.ETH" to evm, "TRON.TRX" to tron, "SOL.SOL" to sol)) {
             val m = ThorMemo.swap(asset, dest, limit)
             assertTrue("$asset memo is ${m.length} bytes", m.toByteArray().size <= ThorMemo.MAX_BYTES)
         }
@@ -139,9 +140,12 @@ class ThorTest {
 
     // ---- planning with a fake node ----
 
-    private class FakeApi(val inbound: Pair<ThorInbound?, String?>, val q: ThorQuoteData) : ThorApi(emptyList()) {
+    private class FakeApi(
+        val inbound: Pair<ThorInbound?, String?>, val q: ThorQuoteData,
+        val byChain: Map<String, Pair<ThorInbound?, String?>> = emptyMap()
+    ) : ThorApi(emptyList()) {
         var asked: List<String>? = null
-        override fun inbound(vaultChain: String) = inbound
+        override fun inbound(vaultChain: String) = byChain[vaultChain] ?: inbound
         override fun quote(from: String, to: String, amount: BigInteger, destination: String): ThorQuoteData {
             asked = listOf(from, to, amount.toString(), destination); return q
         }
@@ -216,20 +220,20 @@ class ThorTest {
         }
         assertEquals("TRON.TRX", ThorAssets.asset(Chain.TRX))
         assertEquals("BASE.ETH", ThorAssets.asset(Chain.BASE))
-        assertNull(ThorAssets.asset(Chain.SOL))
+        assertEquals("SOL.SOL", ThorAssets.asset(Chain.SOL)); assertEquals("SOL", ThorAssets.vaultChain(Chain.SOL)); assertNull(ThorAssets.asset(Chain.ARB))
     }
 
     @Test fun onlyMainnetLitecoinAndTronOfferSwaps() {
         assertTrue(BitcoinProvider.litecoin().supportsBridge)
-        assertEquals(listOf(Chain.BTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.TRX), BitcoinProvider.litecoin().bridgeDestinations())
+        assertEquals(listOf(Chain.BTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.TRX, Chain.SOL), BitcoinProvider.litecoin().bridgeDestinations())
         assertFalse(BitcoinProvider.litecoin(testnet = true).supportsBridge)
         assertFalse(BitcoinProvider().supportsBridge)       // Bitcoin testnet: no THORChain testnet
         val btcMain = BitcoinProvider(apiBase = "https://mempool.space/api", hrp = "bc", coinType = 0, p2pkhVersion = 0x00,
             p2shVersion = 0x05, explorerTxUrl = "https://mempool.space/tx/", thor = ThorSwaps())
         assertTrue(btcMain.supportsBridge)
-        assertEquals(listOf(Chain.LTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.TRX), btcMain.bridgeDestinations())
+        assertEquals(listOf(Chain.LTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.TRX, Chain.SOL), btcMain.bridgeDestinations())
         assertTrue(TronProvider.mainnet().supportsBridge)
-        assertEquals(listOf(Chain.LTC, Chain.BTC, Chain.ETH, Chain.BASE, Chain.BNB), TronProvider.mainnet().bridgeDestinations())
+        assertEquals(listOf(Chain.LTC, Chain.BTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.SOL), TronProvider.mainnet().bridgeDestinations())
         assertFalse(TronProvider().supportsBridge)
         assertNotNull(BitcoinProvider.litecoin().bridgeProviderNote)
         assertNull(BitcoinProvider().bridgeProviderNote)
@@ -265,8 +269,8 @@ class ThorTest {
     }
 
     @Test fun evmSources_andAssets() {
-        assertEquals(listOf(Chain.BTC, Chain.LTC, Chain.TRX), ThorAssets.DESTINATIONS[Chain.ETH])
-        assertEquals(listOf(Chain.BTC, Chain.LTC, Chain.TRX), ThorAssets.DESTINATIONS[Chain.BNB])
+        assertEquals(listOf(Chain.BTC, Chain.LTC, Chain.TRX, Chain.SOL), ThorAssets.DESTINATIONS[Chain.ETH])
+        assertEquals(listOf(Chain.BTC, Chain.LTC, Chain.TRX, Chain.SOL), ThorAssets.DESTINATIONS[Chain.BNB])
         assertEquals("BSC.BNB", ThorAssets.asset(Chain.BNB))
         assertEquals("BSC", ThorAssets.vaultChain(Chain.BNB))
         assertEquals("ETH", ThorAssets.vaultChain(Chain.ETH))
@@ -398,6 +402,25 @@ class ThorTest {
         assertTrue(ThorErrors.friendly("trading is halted").contains("paused"))
         assertEquals("THORChain did not answer", ThorErrors.friendly(null))
         assertEquals("something unrelated", ThorErrors.friendly("something unrelated"))
+    }
+
+    @Test fun plan_namesAPausedDestination_andNeverAsksForAQuote() {
+        val paused = null to "THORChain has paused this network right now."
+        val api = FakeApi(inbound() to null, quote(), byChain = mapOf("BTC" to paused))
+        try { swaps(api).plan(Chain.LTC, Chain.BTC, btcDest, big("1000000")); fail() }
+        catch (e: IllegalStateException) { assertTrue(e.message!!, e.message!!.contains("Bitcoin") && e.message!!.contains("destination")) }
+        assertNull("no quote was requested", api.asked)
+    }
+
+    @Test fun plan_ignoresADestinationLookupThatMerelyFailed() {
+        // not paused, just unreachable: the quote itself is the final authority
+        val api = FakeApi(inbound() to null, quote(), byChain = mapOf("BTC" to (null to "Could not confirm the THORChain vault with 2 data sources. Nothing was sent.")))
+        assertNotNull(swaps(api).plan(Chain.LTC, Chain.BTC, btcDest, big("1000000")))
+    }
+
+    @Test fun friendlyErrors_haltedTrading() {
+        val m = ThorErrors.friendly("HTTP 400: {\"code\":3,\"message\":\"failed to simulate swap: failed to simulate handler: trading is halted, can't process swap: invalid request\"}")
+        assertTrue(m, m.contains("paused part of this route") && m.contains("Nothing was sent") && m.contains("trading is halted"))
     }
 
     // ---- OP_RETURN and coin selection ----

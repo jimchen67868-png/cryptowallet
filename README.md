@@ -202,7 +202,7 @@ should be a few dollars (or Nile/Litecoin testnet coins).
 
 ### Swaps and bridging for Litecoin and Tron (THORChain, mainnet only)
 Neither chain is covered by LI.FI or ParaSwap, so LTC and TRX use THORChain (native swaps, no wrapped coins). On the LTC and TRX cards
-tap **Swap**. From **LTC** you can go to BTC, ETH, Base ETH and TRX; from **BTC** to LTC, ETH, Base ETH and TRX; from **TRX** to LTC, BTC, ETH and Base ETH. The output arrives as the
+tap **Swap**. From **LTC** you can go to BTC, ETH, Base ETH, BNB, TRX and SOL; from **BTC** to LTC, ETH, Base ETH, BNB, TRX and SOL; from **TRX** to LTC, BTC, ETH, Base ETH, BNB and SOL. **Solana is a destination only** (the wallet can't send FROM Solana through THORChain yet). THORChain pauses networks at times: on 2026-11-26 `inbound_addresses` showed BTC and Base halted, all others open. The app checks both ends before quoting and names a paused one. The output arrives as the
 native coin at your own address on the destination network. **From ETH, Base and BNB Chain** (native coin, and built-in tokens such as USDC/USDT: the token is first approved to THORChain's router for exactly the swap amount, never unlimited, and the call is simulated before sending; a token with no THORChain pool is refused at the quote) you can swap to BTC, LTC and TRX: the wallet pays THORChain's router contract with
 `depositWithExpiry(vault, 0x0, amount, memo, expiry)` and the native coin as the transaction value. The router address must be identical on at
 least two nodes (same rule as the vault), the app checks that it has contract code on that network, and `eth_estimateGas` simulates the exact call

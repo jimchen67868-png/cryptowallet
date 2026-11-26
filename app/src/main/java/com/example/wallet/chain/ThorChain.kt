@@ -28,21 +28,22 @@ import java.math.BigInteger
 object ThorAssets {
     private val assets = mapOf(
         Chain.BTC to "BTC.BTC", Chain.LTC to "LTC.LTC", Chain.ETH to "ETH.ETH", Chain.BASE to "BASE.ETH", Chain.TRX to "TRON.TRX",
-        Chain.BNB to "BSC.BNB"
+        Chain.BNB to "BSC.BNB", Chain.SOL to "SOL.SOL"
     )
     private val vaultChains = mapOf(
-        Chain.BTC to "BTC", Chain.LTC to "LTC", Chain.ETH to "ETH", Chain.BASE to "BASE", Chain.TRX to "TRON", Chain.BNB to "BSC"
+        Chain.BTC to "BTC", Chain.LTC to "LTC", Chain.ETH to "ETH", Chain.BASE to "BASE", Chain.TRX to "TRON", Chain.BNB to "BSC", Chain.SOL to "SOL"
     )
 
     /** What each source can deliver to. Native coins only; EVM outputs go to the wallet's own EVM address. */
     val DESTINATIONS: Map<Chain, List<Chain>> = mapOf(
-        Chain.BTC to listOf(Chain.LTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.TRX),
-        Chain.LTC to listOf(Chain.BTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.TRX),
-        Chain.TRX to listOf(Chain.LTC, Chain.BTC, Chain.ETH, Chain.BASE, Chain.BNB),
+        // Solana is a destination only (its chain code SOL is listed by THORChain's inbound_addresses; sending FROM Solana is not built).
+        Chain.BTC to listOf(Chain.LTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.TRX, Chain.SOL),
+        Chain.LTC to listOf(Chain.BTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.TRX, Chain.SOL),
+        Chain.TRX to listOf(Chain.LTC, Chain.BTC, Chain.ETH, Chain.BASE, Chain.BNB, Chain.SOL),
         // EVM sources pay THORChain's router contract (native coin only for now): ETH, Base and BNB Chain
-        Chain.ETH to listOf(Chain.BTC, Chain.LTC, Chain.TRX),
-        Chain.BASE to listOf(Chain.BTC, Chain.LTC, Chain.TRX),
-        Chain.BNB to listOf(Chain.BTC, Chain.LTC, Chain.TRX)
+        Chain.ETH to listOf(Chain.BTC, Chain.LTC, Chain.TRX, Chain.SOL),
+        Chain.BASE to listOf(Chain.BTC, Chain.LTC, Chain.TRX, Chain.SOL),
+        Chain.BNB to listOf(Chain.BTC, Chain.LTC, Chain.TRX, Chain.SOL)
     )
 
     /**
@@ -190,7 +191,8 @@ object ThorErrors {
             "dust threshold" in l -> "That amount is below THORChain's minimum for this network (its dust threshold). Try a larger amount.$detail"
             "not enough" in l && "fee" in l -> "That amount is too small to cover THORChain's fees. Try a larger amount.$detail"
             "less than" in l && "min" in l -> "That amount is below THORChain's minimum for this route. Try a larger amount.$detail"
-            "halted" in l || "paused" in l -> "THORChain has paused this route right now.$detail"
+            "halted" in l || "paused" in l ->
+                "THORChain has paused part of this route right now (a network or a pool). Nothing was sent. Try another destination or try again later.$detail"
             "no pool" in l || "pool does not exist" in l || "not available" in l -> "THORChain has no pool for one of these assets right now.$detail"
             else -> if (m.isBlank()) "THORChain did not answer" else m
         }
@@ -323,6 +325,14 @@ class ThorSwaps(
                 "Too small: THORChain ignores ${from.symbol} deposits below $dust ${from.symbol}. " +
                     "The swap fees mean you will usually need clearly more than that; the quote shows the exact minimum."
             )
+        }
+        // A swap needs both ends to be trading: name the paused one instead of waiting for THORChain's terse "trading is halted".
+        val destVault = ThorAssets.vaultChain(dest)
+        if (destVault != null) {
+            val (_, destErr) = api.inbound(destVault)
+            if (destErr != null && ("paused" in destErr || "halted" in destErr)) {
+                throw IllegalStateException("THORChain has paused ${dest.label} right now, so it can't be the destination. Try another destination or try again later.")
+            }
         }
         val q = api.quote(fromAsset, toAsset, amountIn, destAddress)
         ThorGuard.validate(q, inbound.address, destAddress, amountIn, clockSec(), inbound.router)?.let { throw IllegalStateException(it) }
