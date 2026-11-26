@@ -105,7 +105,9 @@ class ThorInbound(
     val halted: Boolean,
     val tradingPaused: Boolean,
     /** EVM chains only: the router contract that deposits must go through (empty elsewhere). */
-    val router: String = ""
+    val router: String = "",
+    /** THORChain ignores/refuses deposits below this amount (1e8 units). 0 where THORChain sets none. */
+    val dustThreshold: BigInteger = BigInteger.ZERO
 )
 
 /** The parts of `/thorchain/quote/swap` that this wallet uses. Amounts are THORChain 1e8 units. */
@@ -152,7 +154,8 @@ object ThorParse {
                 address = o.str("address"),
                 halted = o.optBoolean("halted", false),
                 tradingPaused = o.optBoolean("chain_trading_paused", false) || o.optBoolean("global_trading_paused", false),
-                router = o.str("router")
+                router = o.str("router"),
+                dustThreshold = o.str("dust_threshold").toBigIntegerOrNull() ?: BigInteger.ZERO
             )
         }
         return null
@@ -171,7 +174,26 @@ object ThorQuorum {
         if (got.map { it.address.lowercase() }.toSet().size != 1) return null to "THORChain data sources disagree about the vault address. Nothing was sent."
         if (got.map { it.router.lowercase() }.toSet().size != 1) return null to "THORChain data sources disagree about the router contract. Nothing was sent."
         if (got.any { it.halted || it.tradingPaused }) return null to "THORChain has paused this network right now."
-        return got.first() to null
+        val first = got.first()
+        val dust = got.maxOf { it.dustThreshold } // the strictest source wins
+        return ThorInbound(first.chain, first.address, first.halted, first.tradingPaused, first.router, dust) to null
+    }
+}
+
+/** THORNode answers invalid requests with terse text; say what it means for the user. The original text is kept in brackets. */
+object ThorErrors {
+    fun friendly(raw: String?): String {
+        val m = raw.orEmpty()
+        val l = m.lowercase()
+        val detail = if (m.isBlank()) "" else " [${m.take(160)}]"
+        return when {
+            "dust threshold" in l -> "That amount is below THORChain's minimum for this network (its dust threshold). Try a larger amount.$detail"
+            "not enough" in l && "fee" in l -> "That amount is too small to cover THORChain's fees. Try a larger amount.$detail"
+            "less than" in l && "min" in l -> "That amount is below THORChain's minimum for this route. Try a larger amount.$detail"
+            "halted" in l || "paused" in l -> "THORChain has paused this route right now.$detail"
+            "no pool" in l || "pool does not exist" in l || "not available" in l -> "THORChain has no pool for one of these assets right now.$detail"
+            else -> if (m.isBlank()) "THORChain did not answer" else m
+        }
     }
 }
 
@@ -260,7 +282,7 @@ open class ThorApi(
                 last = e
             }
         }
-        throw IllegalStateException(last?.message ?: "THORChain did not answer")
+        throw IllegalStateException(ThorErrors.friendly(last?.message))
     }
 
     companion object {
@@ -295,6 +317,13 @@ class ThorSwaps(
         val vaultChain = ThorAssets.vaultChain(from) ?: throw IllegalArgumentException("Unsupported network")
         val (inbound, err) = api.inbound(vaultChain)
         if (inbound == null) throw IllegalStateException(err ?: "THORChain is not available")
+        if (amountIn < inbound.dustThreshold) {
+            val dust = BigDecimal(inbound.dustThreshold).movePointLeft(8).stripTrailingZeros().toPlainString()
+            throw IllegalStateException(
+                "Too small: THORChain ignores ${from.symbol} deposits below $dust ${from.symbol}. " +
+                    "The swap fees mean you will usually need clearly more than that; the quote shows the exact minimum."
+            )
+        }
         val q = api.quote(fromAsset, toAsset, amountIn, destAddress)
         ThorGuard.validate(q, inbound.address, destAddress, amountIn, clockSec(), inbound.router)?.let { throw IllegalStateException(it) }
         val minOut = ThorGuard.minOut(q.expectedOut)

@@ -277,6 +277,10 @@ externally audited. **Not built**: the Station API (quotes, solver address, reve
 SDK source can't be read automatically, and the solver gateway uses scoped API keys (test keys for testnet), so keyless access is unconfirmed.
 `tools/capture_train.sh` reads the public web app to find the API address and endpoint names; paste its output to continue.
 
+## Typing amounts
+Amount boxes accept a dot or a comma as the decimal separator ("0.01" or "0,01"), spaces and 1,234.56-style thousands separators (`AmountParser`).
+Earlier builds only understood a dot and answered "Enter a valid amount" to a comma.
+
 ## What works
 - Create / import wallet, backup confirmation, biometric/PIN unlock
 - Mnemonic encrypted with an AES-256-GCM key in the Android Keystore; seed kept in memory only while unlocked and wiped when the app is backgrounded

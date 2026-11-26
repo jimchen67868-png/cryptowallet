@@ -342,7 +342,7 @@ class WalletViewModel(
         if (!provider.supportsSwap) {
             message = "Swaps are not available on this network."; return
         }
-        val amount = amountText.trim().toBigDecimalOrNull()
+        val amount = com.example.wallet.data.AmountParser.parse(amountText)
         if (amount == null || amount.signum() <= 0) { message = "Enter a valid amount"; return }
         val fromAsset = SwapAsset(from?.id, from?.symbol ?: chain.symbol, from?.decimals ?: provider.nativeDecimals)
         val balance = from?.balance ?: acc.balance
@@ -481,7 +481,7 @@ class WalletViewModel(
         val provider = providers.first { it.chain == chain }
         val acc = accounts.firstOrNull { it.chain == chain } ?: return
         if (!provider.supportsBridge) { message = "Moving funds to another network is not available here."; return }
-        val amount = amountText.trim().toBigDecimalOrNull()
+        val amount = com.example.wallet.data.AmountParser.parse(amountText)
         if (amount == null || amount.signum() <= 0) { message = "Enter a valid amount"; return }
         val fromAsset = SwapAsset(from?.id, from?.symbol ?: chain.symbol, from?.decimals ?: provider.nativeDecimals)
         val balance = from?.balance ?: acc.balance
@@ -749,7 +749,7 @@ class WalletViewModel(
     fun reviewSend(chain: Chain, token: TokenBalance?, to: String, amountText: String) {
         val provider = providers.first { it.chain == chain }
         val acc = accounts.firstOrNull { it.chain == chain } ?: return
-        val amount = amountText.trim().toBigDecimalOrNull()
+        val amount = com.example.wallet.data.AmountParser.parse(amountText)
         val target = to.trim()
         if (amount == null || amount.signum() <= 0) { message = "Enter a valid amount"; return }
         if (!provider.isValidAddress(target)) { message = "Invalid ${chain.symbol} address"; return }
@@ -791,7 +791,7 @@ class WalletViewModel(
     private fun send(chain: Chain, token: TokenBalance?, to: String, amountText: String) {
         val provider = providers.first { it.chain == chain }
         val s = seed?.copyOf() ?: return
-        val amount = amountText.trim().toBigDecimalOrNull()
+        val amount = com.example.wallet.data.AmountParser.parse(amountText)
         val target = to.trim()
         if (amount == null || amount.signum() <= 0) { message = "Enter a valid amount"; s.fill(0); return }
         if (!provider.isValidAddress(target)) { message = "Invalid ${chain.symbol} address"; s.fill(0); return }

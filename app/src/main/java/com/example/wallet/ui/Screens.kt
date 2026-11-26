@@ -392,7 +392,7 @@ private fun SendScreen(vm: WalletViewModel, activity: FragmentActivity, chain: C
                 modifier = Modifier.fillMaxWidth()
             )
             val unitPrice = vm.priceOf(chain, token?.id)
-            val typed = amount.trim().toBigDecimalOrNull()
+            val typed = com.example.wallet.data.AmountParser.parse(amount)
             if (unitPrice != null && typed != null && typed.signum() > 0) {
                 Text("≈ ${formatUsd(typed.toDouble() * unitPrice)}", style = MaterialTheme.typography.bodySmall)
             }
@@ -409,7 +409,7 @@ private fun SendScreen(vm: WalletViewModel, activity: FragmentActivity, chain: C
     vm.pendingSend?.let { p ->
         val fee = p.fee?.stripTrailingZeros()?.toPlainString() ?: "unknown"
         val sym = p.token?.symbol ?: p.chain.symbol
-        val usdText = p.amount.toBigDecimalOrNull()
+        val usdText = com.example.wallet.data.AmountParser.parse(p.amount)
             ?.let { a -> vm.priceOf(p.chain, p.token?.id)?.let { " (≈ ${formatUsd(a.toDouble() * it)})" } }
             .orEmpty()
         AlertDialog(
@@ -501,7 +501,7 @@ private fun SwapScreen(vm: WalletViewModel, activity: FragmentActivity, chain: C
             modifier = Modifier.fillMaxWidth()
         )
         val unitPrice = vm.priceOf(chain, from?.id)
-        val typed = amount.trim().toBigDecimalOrNull()
+        val typed = com.example.wallet.data.AmountParser.parse(amount)
         if (unitPrice != null && typed != null && typed.signum() > 0) {
             Text("≈ ${formatUsd(typed.toDouble() * unitPrice)}", style = MaterialTheme.typography.bodySmall)
         }
@@ -601,7 +601,7 @@ private fun BridgeScreen(vm: WalletViewModel, activity: FragmentActivity, chain:
             modifier = Modifier.fillMaxWidth()
         )
         val unitPrice = vm.priceOf(chain, from?.id)
-        val typed = amount.trim().toBigDecimalOrNull()
+        val typed = com.example.wallet.data.AmountParser.parse(amount)
         if (unitPrice != null && typed != null && typed.signum() > 0) {
             Text("≈ ${formatUsd(typed.toDouble() * unitPrice)}", style = MaterialTheme.typography.bodySmall)
         }

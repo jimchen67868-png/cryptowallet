@@ -369,6 +369,37 @@ class ThorTest {
         assertFalse(i.halted)
     }
 
+    // ---- minimums ----
+
+    @Test fun parse_dustThreshold_andQuorumKeepsTheStrictest() {
+        val arr = JSONArray("""[{"chain":"LTC","address":"$vault","dust_threshold":"10000","halted":false}]""")
+        assertEquals(big("10000"), ThorParse.inbound(arr, "LTC")!!.dustThreshold)
+        assertEquals(BigInteger.ZERO, ThorParse.inbound(JSONArray("""[{"chain":"LTC","address":"$vault"}]"""), "LTC")!!.dustThreshold)
+        val a = ThorInbound("LTC", vault, false, false, "", big("10000"))
+        val b = ThorInbound("LTC", vault, false, false, "", big("25000"))
+        assertEquals(big("25000"), ThorQuorum.agree(listOf(a, b)).first!!.dustThreshold)
+        assertEquals(big("25000"), ThorQuorum.agree(listOf(b, a)).first!!.dustThreshold)
+    }
+
+    @Test fun plan_refusesBelowTheDustThreshold_beforeAskingForAQuote() {
+        val api = FakeApi(ThorInbound("LTC", vault, false, false, "", big("10000")) to null, quote(minIn = "1000"))
+        try { swaps(api).plan(Chain.LTC, Chain.BTC, btcDest, big("9999")); fail() }
+        catch (e: IllegalStateException) { assertTrue(e.message!!, e.message!!.contains("0.0001 LTC")) }
+        assertNull("no quote request was made", api.asked)
+        swaps(api).plan(Chain.LTC, Chain.BTC, btcDest, big("10000")) // exactly at the threshold is accepted by our check
+        assertNotNull(api.asked)
+    }
+
+    @Test fun friendlyErrors() {
+        val dust = ThorErrors.friendly("HTTP 400: {\"code\":3,\"message\":\"amount less than dust threshold: invalid request\"}")
+        assertTrue(dust, dust.startsWith("That amount is below THORChain's minimum for this network"))
+        assertTrue(dust.contains("dust threshold"))               // the original text stays visible
+        assertTrue(ThorErrors.friendly("not enough asset to pay for fees").contains("too small to cover"))
+        assertTrue(ThorErrors.friendly("trading is halted").contains("paused"))
+        assertEquals("THORChain did not answer", ThorErrors.friendly(null))
+        assertEquals("something unrelated", ThorErrors.friendly("something unrelated"))
+    }
+
     // ---- OP_RETURN and coin selection ----
 
     @Test fun opReturn_scriptAndSize() {
